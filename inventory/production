@@ -1,0 +1,137 @@
+# VeriAction Production Inventory
+# GDPR-Compliant Multi-Region Deployment
+#
+# IMPORTANT: Replace <IP_ADDRESS> placeholders with actual server IPs
+# Ensure EU servers are physically located in EU data centers
+
+###############################################################################
+# EU REGION - GDPR COMPLIANT
+###############################################################################
+
+[eu_cockroachdb]
+# CockroachDB cluster nodes (EU region)
+eu-crdb-01 ansible_host=<EU_CRDB_IP_1> cockroachdb_node_id=1
+eu-crdb-02 ansible_host=<EU_CRDB_IP_2> cockroachdb_node_id=2
+eu-crdb-03 ansible_host=<EU_CRDB_IP_3> cockroachdb_node_id=3
+# Optional: Scale to 5 nodes
+# eu-crdb-04 ansible_host=<EU_CRDB_IP_4> cockroachdb_node_id=4
+# eu-crdb-05 ansible_host=<EU_CRDB_IP_5> cockroachdb_node_id=5
+
+[eu_k8s_masters]
+# Kubernetes master nodes (EU region)
+eu-k8s-master-01 ansible_host=<EU_K8S_MASTER_IP_1>
+# Optional: HA masters
+# eu-k8s-master-02 ansible_host=<EU_K8S_MASTER_IP_2>
+# eu-k8s-master-03 ansible_host=<EU_K8S_MASTER_IP_3>
+
+[eu_k8s_workers]
+# Kubernetes worker nodes (EU region)
+eu-k8s-worker-01 ansible_host=<EU_K8S_WORKER_IP_1>
+eu-k8s-worker-02 ansible_host=<EU_K8S_WORKER_IP_2>
+eu-k8s-worker-03 ansible_host=<EU_K8S_WORKER_IP_3>
+# Optional: Scale workers
+# eu-k8s-worker-04 ansible_host=<EU_K8S_WORKER_IP_4>
+# eu-k8s-worker-05 ansible_host=<EU_K8S_WORKER_IP_5>
+
+[eu_haproxy]
+# HAProxy load balancers (EU region) - HA pair
+eu-haproxy-01 ansible_host=<EU_HAPROXY_IP_1> haproxy_priority=100 haproxy_state=MASTER
+eu-haproxy-02 ansible_host=<EU_HAPROXY_IP_2> haproxy_priority=90 haproxy_state=BACKUP
+
+###############################################################################
+# GLOBAL REGION
+###############################################################################
+
+[global_cockroachdb]
+# CockroachDB cluster nodes (Global region)
+global-crdb-01 ansible_host=<GLOBAL_CRDB_IP_1> cockroachdb_node_id=1
+global-crdb-02 ansible_host=<GLOBAL_CRDB_IP_2> cockroachdb_node_id=2
+global-crdb-03 ansible_host=<GLOBAL_CRDB_IP_3> cockroachdb_node_id=3
+# Optional: Scale to 5 nodes
+# global-crdb-04 ansible_host=<GLOBAL_CRDB_IP_4> cockroachdb_node_id=4
+# global-crdb-05 ansible_host=<GLOBAL_CRDB_IP_5> cockroachdb_node_id=5
+
+[global_k8s_masters]
+# Kubernetes master nodes (Global region)
+global-k8s-master-01 ansible_host=<GLOBAL_K8S_MASTER_IP_1>
+
+[global_k8s_workers]
+# Kubernetes worker nodes (Global region)
+global-k8s-worker-01 ansible_host=<GLOBAL_K8S_WORKER_IP_1>
+global-k8s-worker-02 ansible_host=<GLOBAL_K8S_WORKER_IP_2>
+global-k8s-worker-03 ansible_host=<GLOBAL_K8S_WORKER_IP_3>
+
+[global_haproxy]
+# HAProxy load balancers (Global region) - HA pair
+global-haproxy-01 ansible_host=<GLOBAL_HAPROXY_IP_1> haproxy_priority=100 haproxy_state=MASTER
+global-haproxy-02 ansible_host=<GLOBAL_HAPROXY_IP_2> haproxy_priority=90 haproxy_state=BACKUP
+
+###############################################################################
+# MONITORING (Monitors all regions)
+###############################################################################
+
+[monitoring]
+# Dedicated monitoring servers (can be in any region, but monitors all)
+monitoring-01 ansible_host=<MONITORING_IP_1> monitoring_role=primary
+monitoring-02 ansible_host=<MONITORING_IP_2> monitoring_role=secondary
+
+###############################################################################
+# GROUP COMPOSITIONS
+###############################################################################
+
+[cockroachdb:children]
+eu_cockroachdb
+global_cockroachdb
+
+[k8s_masters:children]
+eu_k8s_masters
+global_k8s_masters
+
+[k8s_workers:children]
+eu_k8s_workers
+global_k8s_workers
+
+[k8s_all:children]
+k8s_masters
+k8s_workers
+
+[haproxy:children]
+eu_haproxy
+global_haproxy
+
+[eu_region:children]
+eu_cockroachdb
+eu_k8s_masters
+eu_k8s_workers
+eu_haproxy
+
+[global_region:children]
+global_cockroachdb
+global_k8s_masters
+global_k8s_workers
+global_haproxy
+
+[all_servers:children]
+eu_region
+global_region
+monitoring
+
+###############################################################################
+# REGION-SPECIFIC VARIABLES
+###############################################################################
+
+[eu_region:vars]
+region=eu
+data_residency=eu
+gdpr_compliant=true
+timezone=Europe/Berlin
+
+[global_region:vars]
+region=global
+data_residency=global
+gdpr_compliant=false
+timezone=UTC
+
+[monitoring:vars]
+region=global
+timezone=UTC

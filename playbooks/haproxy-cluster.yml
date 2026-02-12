@@ -1,0 +1,93 @@
+---
+# HAProxy Load Balancer Deployment Playbook
+# High-availability gRPC load balancing with keepalived
+#
+# Usage:
+#   ansible-playbook playbooks/haproxy-cluster.yml
+#   ansible-playbook playbooks/haproxy-cluster.yml --limit eu_haproxy
+
+- name: Deploy HAProxy Load Balancers
+  hosts: haproxy
+  become: true
+  tags: [haproxy]
+
+  pre_tasks:
+    - name: Validate HAProxy configuration
+      assert:
+        that:
+          - groups['haproxy'] | length >= 2
+          - haproxy_vip_eu is defined or haproxy_vip_global is defined
+        fail_msg: "HAProxy requires at least 2 nodes and a VIP configured"
+
+    - name: Display deployment info
+      debug:
+        msg: |
+          Deploying HAProxy {{ haproxy_version }}
+          Region: {{ region }}
+          Role: {{ haproxy_state }}
+          VIP: {{ haproxy_vip_eu if region == 'eu' else haproxy_vip_global }}
+
+  roles:
+    - haproxy
+
+- name: Configure Keepalived for HA
+  hosts: haproxy
+  become: true
+  tags: [keepalived]
+  when: keepalived_enabled | default(true)
+
+  roles:
+    - keepalived
+
+- name: Update HAProxy Backend Servers
+  hosts: haproxy
+  become: true
+  tags: [backends]
+
+  tasks:
+    - name: Get Kubernetes worker IPs
+      set_fact:
+        k8s_worker_ips: "{{ groups[region + '_k8s_workers'] | map('extract', hostvars, 'ansible_host') | list }}"
+      when: region is defined
+
+    - name: Update HAProxy configuration with backend servers
+      template:
+        src: templates/haproxy/haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+        validate: haproxy -c -f %s
+      notify: reload haproxy
+
+- name: Validate HAProxy Cluster
+  hosts: haproxy
+  become: true
+  tags: [validate, always]
+
+  tasks:
+    - name: Check HAProxy service status
+      systemd:
+        name: haproxy
+        state: started
+      check_mode: yes
+      register: haproxy_status
+
+    - name: Verify HAProxy is listening
+      wait_for:
+        port: "{{ haproxy_grpc_port }}"
+        timeout: 10
+
+    - name: Check stats page
+      uri:
+        url: "http://localhost:{{ haproxy_stats_port }}/stats"
+        status_code: 200
+      when: haproxy_stats_enabled
+
+    - name: Verify VIP assignment (MASTER only)
+      shell: ip addr show | grep -q "{{ haproxy_vip_eu if region == 'eu' else haproxy_vip_global }}"
+      when: haproxy_state == "MASTER"
+      changed_when: false
+      register: vip_check
+
+    - name: Display VIP status
+      debug:
+        msg: "VIP {{ haproxy_vip_eu if region == 'eu' else haproxy_vip_global }} is assigned to {{ ansible_hostname }}"
+      when: haproxy_state == "MASTER" and vip_check is succeeded

@@ -1,0 +1,272 @@
+---
+# HAProxy Load Balancer Configuration
+# High-availability gRPC load balancing
+
+###############################################################################
+# VERSION & INSTALLATION
+###############################################################################
+
+haproxy_version: "2.8"
+haproxy_user: haproxy
+haproxy_group: haproxy
+
+###############################################################################
+# NETWORK CONFIGURATION
+###############################################################################
+
+# Virtual IP (VIP) for HA setup (one per region)
+haproxy_vip_eu: "<EU_VIP_ADDRESS>"  # To be set in inventory or host_vars
+haproxy_vip_global: "<GLOBAL_VIP_ADDRESS>"  # To be set in inventory or host_vars
+
+# Ports
+haproxy_stats_port: 8404
+haproxy_grpc_port: 9090
+haproxy_http_port: 8080
+haproxy_kubernetes_api_port: 6443
+
+###############################################################################
+# KEEPALIVED CONFIGURATION (High Availability)
+###############################################################################
+
+keepalived_enabled: true
+keepalived_interface: eth0  # Primary network interface
+keepalived_router_id: "{{ 51 if region == 'eu' else 52 }}"  # Unique per region
+keepalived_vrrp_password: "{{ vault_keepalived_password }}"
+
+# VRRP settings
+keepalived_check_script: /usr/local/bin/check_haproxy.sh
+keepalived_check_interval: 2
+keepalived_check_weight: -20
+
+###############################################################################
+# HAPROXY GLOBAL CONFIGURATION
+###############################################################################
+
+haproxy_global_config:
+  maxconn: 50000
+  log: /dev/log local0
+  chroot: /var/lib/haproxy
+  stats_socket: /run/haproxy/admin.sock mode 660 level admin
+  stats_timeout: 30s
+  user: haproxy
+  group: haproxy
+  daemon: true
+  
+  # SSL/TLS
+  ssl_default_bind_ciphers: "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384"
+  ssl_default_bind_options: "ssl-min-ver TLSv1.2 no-tls-tickets"
+  
+  # Performance tuning
+  tune_ssl_default_dh_param: 2048
+  tune_bufsize: 32768
+  tune_maxrewrite: 8192
+
+###############################################################################
+# HAPROXY DEFAULTS
+###############################################################################
+
+haproxy_defaults:
+  log: global
+  mode: http
+  option: 
+    - httplog
+    - dontlognull
+    - http-server-close
+    - redispatch
+  retries: 3
+  timeout_connect: 5s
+  timeout_client: 50s
+  timeout_server: 50s
+  timeout_tunnel: 1h
+  timeout_http_keep_alive: 10s
+  timeout_check: 5s
+  maxconn: 10000
+
+###############################################################################
+# FRONTEND CONFIGURATIONS
+###############################################################################
+
+haproxy_frontends:
+  # gRPC frontend (GeoIP service)
+  - name: geoip_grpc
+    bind: "*:{{ haproxy_grpc_port }}"
+    mode: http
+    option:
+      - http-use-htx
+    http_request:
+      - set-header X-Forwarded-Proto https if { ssl_fc }
+      - set-header X-Real-IP %[src]
+    default_backend: geoip_grpc_backend
+  
+  # HTTP frontend (health checks, admin)
+  - name: geoip_http
+    bind: "*:{{ haproxy_http_port }}"
+    mode: http
+    default_backend: geoip_http_backend
+  
+  # Kubernetes API frontend (optional, for HA masters)
+  - name: k8s_api
+    bind: "*:{{ haproxy_kubernetes_api_port }}"
+    mode: tcp
+    option:
+      - tcplog
+    default_backend: k8s_api_backend
+
+###############################################################################
+# BACKEND CONFIGURATIONS
+###############################################################################
+
+haproxy_backends:
+  # gRPC backend
+  - name: geoip_grpc_backend
+    mode: http
+    balance: roundrobin
+    option:
+      - http-use-htx
+      - httpchk GET /health
+    http_check: expect status 200
+    default_server_params: check inter 5s fall 3 rise 2
+    servers: []  # Populated dynamically from Kubernetes service
+  
+  # HTTP backend
+  - name: geoip_http_backend
+    mode: http
+    balance: roundrobin
+    option:
+      - httpchk GET /health
+    http_check: expect status 200
+    default_server_params: check inter 5s fall 3 rise 2
+    servers: []  # Populated dynamically
+  
+  # Kubernetes API backend
+  - name: k8s_api_backend
+    mode: tcp
+    balance: roundrobin
+    option:
+      - tcp-check
+    default_server_params: check inter 5s fall 3 rise 2
+    servers: []  # Populated from k8s_masters inventory group
+
+###############################################################################
+# STATS & MONITORING
+###############################################################################
+
+haproxy_stats_enabled: true
+haproxy_stats_config:
+  uri: /stats
+  realm: HAProxy\ Statistics
+  auth_user: admin
+  auth_pass: "{{ vault_haproxy_stats_password }}"
+  refresh: 30s
+  show_legends: true
+  show_node: true
+
+# Prometheus exporter
+haproxy_prometheus_exporter_enabled: true
+haproxy_prometheus_exporter_port: 9101
+haproxy_prometheus_exporter_version: "0.15.0"
+
+###############################################################################
+# HEALTH CHECKS
+###############################################################################
+
+haproxy_health_check_config:
+  interval: 5s
+  timeout: 3s
+  fall: 3
+  rise: 2
+  
+# Backend server health check settings
+backend_health_check:
+  geoip:
+    method: GET
+    uri: /health
+    expect: status 200
+  kubernetes:
+    method: GET
+    uri: /healthz
+    expect: status 200
+
+###############################################################################
+# LOGGING
+###############################################################################
+
+haproxy_log_level: info
+haproxy_log_facility: local0
+haproxy_log_format: "%ci:%cp [%tr] %ft %b/%s %TR/%Tw/%Tc/%Tr/%Ta %ST %B %CC %CS %tsc %ac/%fc/%bc/%sc/%rc %sq/%bq %hr %hs %{+Q}r"
+
+# Rsyslog configuration for HAProxy
+rsyslog_haproxy_config: |
+  $ModLoad imudp
+  $UDPServerRun 514
+  local0.* /var/log/haproxy/haproxy.log
+  & stop
+
+###############################################################################
+# SSL/TLS CONFIGURATION
+###############################################################################
+
+haproxy_ssl_enabled: false  # Set to true when using HTTPS/gRPCS
+haproxy_ssl_certificate: /etc/haproxy/ssl/haproxy.pem
+haproxy_ssl_ca_certificate: /etc/haproxy/ssl/ca.pem
+
+# TLS settings
+haproxy_tls_min_version: 1.2
+haproxy_tls_ciphers: "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384"
+
+###############################################################################
+# RATE LIMITING & PROTECTION
+###############################################################################
+
+# Rate limiting (requests per IP)
+haproxy_rate_limit_enabled: true
+haproxy_rate_limit_requests: 100
+haproxy_rate_limit_period: 10s
+
+# DDoS protection
+haproxy_ddos_protection:
+  conn_rate_limit: 100
+  conn_cur_limit: 50
+  src_conn_rate_limit: 20
+
+###############################################################################
+# DYNAMIC SERVER UPDATES
+###############################################################################
+
+# Runtime API for dynamic backend updates
+haproxy_runtime_api_enabled: true
+haproxy_runtime_api_socket: /var/run/haproxy.sock
+
+# Server template for auto-scaling backends
+haproxy_server_template_enabled: true
+haproxy_server_template_size: 10  # Max backend servers
+
+###############################################################################
+# SYSTEMD SERVICE
+###############################################################################
+
+haproxy_service_enabled: true
+haproxy_service_state: started
+
+haproxy_systemd_config:
+  Restart: on-failure
+  RestartSec: 5s
+  LimitNOFILE: 65536
+
+###############################################################################
+# FIREWALL RULES
+###############################################################################
+
+haproxy_firewall_rules:
+  - port: "{{ haproxy_grpc_port }}"
+    proto: tcp
+    source: any
+  - port: "{{ haproxy_http_port }}"
+    proto: tcp
+    source: any
+  - port: "{{ haproxy_stats_port }}"
+    proto: tcp
+    source: monitoring_subnet  # Restrict stats access
+  - port: 112  # VRRP
+    proto: vrrp
+    source: haproxy_subnet

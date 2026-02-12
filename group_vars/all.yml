@@ -1,0 +1,237 @@
+---
+# Global Variables for All Hosts
+# These variables apply to all environments and regions
+
+###############################################################################
+# ENVIRONMENT SETTINGS
+###############################################################################
+
+environment: production
+deployment_timestamp: "{{ ansible_date_time.iso8601 }}"
+
+###############################################################################
+# NETWORK CONFIGURATION
+###############################################################################
+
+# DNS servers
+dns_nameservers:
+  - 1.1.1.1
+  - 8.8.8.8
+
+# NTP servers
+ntp_servers:
+  - 0.pool.ntp.org
+  - 1.pool.ntp.org
+  - 2.pool.ntp.org
+
+###############################################################################
+# SECURITY SETTINGS
+###############################################################################
+
+# SSH configuration
+ssh_port: 22
+ssh_permit_root_login: "no"
+ssh_password_authentication: "no"
+ssh_allowed_users:
+  - ansible
+  - deploy
+
+# Firewall
+firewall_enabled: true
+firewall_default_policy: deny
+
+# TLS/SSL
+tls_min_version: "1.2"
+tls_ciphers: "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384"
+
+# Certificate validity
+cert_validity_days: 365
+cert_renew_before_days: 30
+
+###############################################################################
+# USER MANAGEMENT
+###############################################################################
+
+# Service user
+service_user: veriaction
+service_group: veriaction
+service_uid: 2000
+service_gid: 2000
+
+# Deployment user
+deploy_user: deploy
+deploy_group: deploy
+deploy_uid: 2001
+deploy_gid: 2001
+
+###############################################################################
+# DIRECTORY STRUCTURE
+###############################################################################
+
+# Base directories
+base_dir: /opt/veriaction
+config_dir: "{{ base_dir }}/config"
+data_dir: "{{ base_dir }}/data"
+logs_dir: "{{ base_dir }}/logs"
+backup_dir: "{{ base_dir }}/backups"
+scripts_dir: "{{ base_dir }}/scripts"
+
+# SSL/TLS certificates
+ssl_dir: /etc/ssl/veriaction
+ssl_ca_dir: "{{ ssl_dir }}/ca"
+ssl_certs_dir: "{{ ssl_dir }}/certs"
+ssl_keys_dir: "{{ ssl_dir }}/keys"
+
+###############################################################################
+# MONITORING & LOGGING
+###############################################################################
+
+# Prometheus exporters
+node_exporter_version: "1.7.0"
+node_exporter_port: 9100
+
+# Log rotation
+log_rotation_days: 30
+log_compression: true
+
+# Syslog
+syslog_enabled: true
+syslog_facility: local0
+
+###############################################################################
+# DOCKER CONFIGURATION
+###############################################################################
+
+docker_version: "24.0"
+docker_registry: "ghcr.io/veriaction"
+docker_data_dir: /var/lib/docker
+
+# Container resource limits (defaults)
+container_cpu_limit: "2"
+container_memory_limit: "4Gi"
+
+###############################################################################
+# BACKUP CONFIGURATION
+###############################################################################
+
+# Backup settings
+backup_enabled: true
+backup_retention_days: 30
+backup_compression: true
+backup_encryption: true
+
+# Backup destinations
+backup_local_path: "{{ backup_dir }}"
+backup_s3_bucket: "veriaction-backups-{{ region }}"
+backup_s3_prefix: "{{ environment }}/{{ inventory_hostname }}"
+
+###############################################################################
+# PACKAGE MANAGEMENT
+###############################################################################
+
+# System packages
+system_packages:
+  - curl
+  - wget
+  - git
+  - vim
+  - htop
+  - iotop
+  - netcat
+  - net-tools
+  - dnsutils
+  - tcpdump
+  - rsync
+  - unzip
+  - jq
+  - python3
+  - python3-pip
+
+# Package update policy
+package_update_cache: true
+package_upgrade: false  # Only upgrade explicitly
+
+###############################################################################
+# TIME ZONE & LOCALE
+###############################################################################
+
+# Default timezone (can be overridden per region)
+default_timezone: UTC
+
+# Locale settings
+locale: en_US.UTF-8
+language: en_US.UTF-8
+
+###############################################################################
+# PERFORMANCE TUNING
+###############################################################################
+
+# Kernel parameters
+sysctl_settings:
+  # Network performance
+  net.core.rmem_max: 134217728
+  net.core.wmem_max: 134217728
+  net.ipv4.tcp_rmem: "4096 87380 67108864"
+  net.ipv4.tcp_wmem: "4096 65536 67108864"
+  net.core.netdev_max_backlog: 5000
+  net.ipv4.tcp_congestion_control: bbr
+  
+  # File handles
+  fs.file-max: 2097152
+  fs.nr_open: 2097152
+  
+  # Memory
+  vm.swappiness: 10
+  vm.dirty_ratio: 15
+  vm.dirty_background_ratio: 5
+
+# System limits
+system_limits:
+  - domain: "*"
+    type: soft
+    item: nofile
+    value: 65536
+  - domain: "*"
+    type: hard
+    item: nofile
+    value: 65536
+  - domain: "*"
+    type: soft
+    item: nproc
+    value: 32768
+  - domain: "*"
+    type: hard
+    item: nproc
+    value: 32768
+
+###############################################################################
+# HEALTHCHECK CONFIGURATION
+###############################################################################
+
+healthcheck_enabled: true
+healthcheck_interval: 30
+healthcheck_timeout: 10
+healthcheck_retries: 3
+
+###############################################################################
+# NOTIFICATION SETTINGS
+###############################################################################
+
+# Alerting endpoints (configured in vault.yml)
+# slack_webhook_url: defined in vault
+# pagerduty_integration_key: defined in vault
+
+notification_channels:
+  - slack
+  - email
+
+###############################################################################
+# FEATURE FLAGS
+###############################################################################
+
+features:
+  auto_scaling: true
+  auto_healing: true
+  metrics_collection: true
+  audit_logging: true
+  gdpr_compliance_checks: true

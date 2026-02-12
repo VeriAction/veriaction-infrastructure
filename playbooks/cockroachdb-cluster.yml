@@ -1,0 +1,167 @@
+---
+# CockroachDB Cluster Deployment Playbook
+# Deploys multi-node CockroachDB clusters in EU and Global regions
+#
+# Usage:
+#   ansible-playbook playbooks/cockroachdb-cluster.yml
+#   ansible-playbook playbooks/cockroachdb-cluster.yml --limit eu_cockroachdb
+#   ansible-playbook playbooks/cockroachdb-cluster.yml --tags certificates
+
+- name: CockroachDB Cluster Deployment
+  hosts: cockroachdb
+  become: true
+  serial: "{{ cockroachdb_serial | default('100%') }}"  # For rolling upgrades
+  
+  pre_tasks:
+    - name: Validate inventory configuration
+      assert:
+        that:
+          - groups['cockroachdb'] | length >= 3
+          - cockroachdb_version is defined
+          - region is defined
+        fail_msg: "Invalid CockroachDB configuration. Minimum 3 nodes required."
+    
+    - name: Display deployment info
+      debug:
+        msg: |
+          Deploying CockroachDB {{ cockroachdb_version }}
+          Region: {{ region }}
+          Cluster: {{ cockroachdb_cluster_name }}
+          Node {{ cockroachdb_node_id }}/{{ groups[group_names | select('match', '.*cockroachdb.*') | first] | length }}
+  
+  roles:
+    - role: cockroachdb
+      tags: [cockroachdb]
+  
+  post_tasks:
+    - name: Wait for CockroachDB to be healthy
+      uri:
+        url: "http://localhost:{{ cockroachdb_http_port }}/health?ready=1"
+        method: GET
+        status_code: 200
+      register: health_check
+      until: health_check.status == 200
+      retries: 30
+      delay: 10
+      tags: [validate]
+    
+    - name: Display node status
+      debug:
+        msg: "CockroachDB node {{ ansible_hostname }} is healthy and ready"
+
+# Initialize cluster (run once on first node)
+- name: Initialize CockroachDB Cluster
+  hosts: cockroachdb[0]
+  become: true
+  tags: [init]
+  
+  tasks:
+    - name: Check if cluster is already initialized
+      shell: |
+        cockroach node status --certs-dir={{ cockroachdb_certs_dir }} --host=localhost:{{ cockroachdb_port }} 2>&1 | grep -q "node"
+      register: cluster_initialized
+      failed_when: false
+      changed_when: false
+    
+    - name: Initialize cluster
+      command: cockroach init --certs-dir={{ cockroachdb_certs_dir }} --host=localhost:{{ cockroachdb_port }}
+      when: cluster_initialized.rc != 0
+      register: init_result
+    
+    - name: Display init result
+      debug:
+        msg: "{{ init_result.stdout }}"
+      when: init_result is changed
+
+# Configure cluster settings
+- name: Configure CockroachDB Cluster
+  hosts: cockroachdb[0]
+  become: true
+  tags: [configure]
+  
+  tasks:
+    - name: Create databases
+      command: |
+        cockroach sql --certs-dir={{ cockroachdb_certs_dir }} --host=localhost:{{ cockroachdb_port }} --execute="CREATE DATABASE IF NOT EXISTS {{ item.name }};"
+      loop: "{{ cockroachdb_databases }}"
+      register: db_create
+      changed_when: "'CREATE DATABASE' in db_create.stdout"
+    
+    - name: Create users
+      command: |
+        cockroach sql --certs-dir={{ cockroachdb_certs_dir }} --host=localhost:{{ cockroachdb_port }} --execute="CREATE USER IF NOT EXISTS {{ item.username }} WITH PASSWORD '{{ item.password }}';"
+      loop: "{{ cockroachdb_users }}"
+      no_log: true
+      register: user_create
+      changed_when: "'CREATE ROLE' in user_create.stdout"
+    
+    - name: Grant database privileges
+      command: |
+        cockroach sql --certs-dir={{ cockroachdb_certs_dir }} --host=localhost:{{ cockroachdb_port }} --execute="GRANT {{ item.1.privileges }} ON DATABASE {{ item.1.db }} TO {{ item.0.username }};"
+      loop: "{{ cockroachdb_users | subelements('databases') | map('flatten') }}"
+      loop_control:
+        label: "{{ item.0.username }} -> {{ item.1 }}"
+      register: grant_result
+      changed_when: "'GRANT' in grant_result.stdout"
+    
+    - name: Apply cluster settings
+      command: |
+        cockroach sql --certs-dir={{ cockroachdb_certs_dir }} --host=localhost:{{ cockroachdb_port }} --execute="SET CLUSTER SETTING {{ item.name }} = {{ item.value }};"
+      loop: "{{ cockroachdb_cluster_settings }}"
+      register: setting_result
+      changed_when: "'SET CLUSTER SETTING' in setting_result.stdout"
+    
+    - name: Configure zone configurations
+      command: |
+        cockroach sql --certs-dir={{ cockroachdb_certs_dir }} --host=localhost:{{ cockroachdb_port }} --execute="ALTER RANGE default CONFIGURE ZONE USING num_replicas = {{ cockroachdb_default_replication_factor }};"
+      register: zone_config
+      changed_when: "'CONFIGURE ZONE' in zone_config.stdout"
+
+# Setup automated backups
+- name: Configure CockroachDB Backups
+  hosts: cockroachdb[0]
+  become: true
+  tags: [backup]
+  when: cockroachdb_backup_enabled
+  
+  tasks:
+    - name: Create backup schedule (full)
+      command: |
+        cockroach sql --certs-dir={{ cockroachdb_certs_dir }} --host=localhost:{{ cockroachdb_port }} --execute="CREATE SCHEDULE IF NOT EXISTS full_backup FOR BACKUP INTO '{{ cockroachdb_backup_destination }}/full' {{ cockroachdb_full_backup_schedule }} WITH DETACHED;"
+      register: backup_schedule
+      changed_when: "'CREATE SCHEDULE' in backup_schedule.stdout"
+    
+    - name: Create backup schedule (incremental)
+      command: |
+        cockroach sql --certs-dir={{ cockroachdb_certs_dir }} --host=localhost:{{ cockroachdb_port }} --execute="CREATE SCHEDULE IF NOT EXISTS incremental_backup FOR BACKUP INTO LATEST IN '{{ cockroachdb_backup_destination }}/full' {{ cockroachdb_incremental_backup_schedule }} WITH DETACHED;"
+      register: incremental_schedule
+      changed_when: "'CREATE SCHEDULE' in incremental_schedule.stdout"
+
+# Final validation
+- name: Validate CockroachDB Cluster
+  hosts: cockroachdb
+  become: true
+  tags: [validate, always]
+  
+  tasks:
+    - name: Check node status
+      command: cockroach node status --certs-dir={{ cockroachdb_certs_dir }} --host=localhost:{{ cockroachdb_port }} --format=table
+      register: node_status
+      changed_when: false
+    
+    - name: Display cluster status
+      debug:
+        msg: "{{ node_status.stdout_lines }}"
+      run_once: true
+    
+    - name: Verify all nodes are healthy
+      shell: |
+        cockroach node status --certs-dir={{ cockroachdb_certs_dir }} --host=localhost:{{ cockroachdb_port }} --format=csv | grep -v "is_live" | awk -F',' '{print $8}' | grep -qv "true"
+      register: health_status
+      failed_when: health_status.rc == 0
+      changed_when: false
+    
+    - name: Success message
+      debug:
+        msg: "CockroachDB cluster {{ cockroachdb_cluster_name }} is fully operational with {{ groups[group_names | select('match', '.*cockroachdb.*') | first] | length }} nodes"
+      run_once: true

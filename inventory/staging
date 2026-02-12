@@ -1,0 +1,43 @@
+# VeriAction Staging Inventory
+# Smaller-scale staging environment for testing
+
+[staging_cockroachdb]
+staging-crdb-01 ansible_host=<STAGING_CRDB_IP_1> cockroachdb_node_id=1
+staging-crdb-02 ansible_host=<STAGING_CRDB_IP_2> cockroachdb_node_id=2
+staging-crdb-03 ansible_host=<STAGING_CRDB_IP_3> cockroachdb_node_id=3
+
+[staging_k8s_masters]
+staging-k8s-master-01 ansible_host=<STAGING_K8S_MASTER_IP_1>
+
+[staging_k8s_workers]
+staging-k8s-worker-01 ansible_host=<STAGING_K8S_WORKER_IP_1>
+staging-k8s-worker-02 ansible_host=<STAGING_K8S_WORKER_IP_2>
+
+[staging_haproxy]
+staging-haproxy-01 ansible_host=<STAGING_HAPROXY_IP_1> haproxy_priority=100 haproxy_state=MASTER
+
+[staging_monitoring]
+staging-monitoring-01 ansible_host=<STAGING_MONITORING_IP_1>
+
+[cockroachdb:children]
+staging_cockroachdb
+
+[k8s_masters:children]
+staging_k8s_masters
+
+[k8s_workers:children]
+staging_k8s_workers
+
+[k8s_all:children]
+k8s_masters
+k8s_workers
+
+[haproxy:children]
+staging_haproxy
+
+[monitoring:children]
+staging_monitoring
+
+[all:vars]
+environment=staging
+region=staging

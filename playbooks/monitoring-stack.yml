@@ -1,0 +1,142 @@
+---
+# Monitoring Stack Deployment Playbook
+# Prometheus + Grafana + Alertmanager on dedicated VMs
+#
+# Usage:
+#   ansible-playbook playbooks/monitoring-stack.yml
+#   ansible-playbook playbooks/monitoring-stack.yml --tags prometheus
+
+- name: Deploy Prometheus
+  hosts: monitoring
+  become: true
+  tags: [prometheus]
+
+  roles:
+    - prometheus
+
+  post_tasks:
+    - name: Wait for Prometheus to be healthy
+      uri:
+        url: "http://localhost:{{ prometheus_port }}/-/healthy"
+        status_code: 200
+      register: prometheus_health
+      until: prometheus_health.status == 200
+      retries: 10
+      delay: 5
+
+- name: Deploy Alertmanager
+  hosts: monitoring
+  become: true
+  tags: [alertmanager]
+
+  roles:
+    - alertmanager
+
+  post_tasks:
+    - name: Wait for Alertmanager to be ready
+      uri:
+        url: "http://localhost:{{ alertmanager_port }}/-/healthy"
+        status_code: 200
+      register: alertmanager_health
+      until: alertmanager_health.status == 200
+      retries: 10
+      delay: 5
+
+- name: Deploy Grafana
+  hosts: monitoring
+  become: true
+  tags: [grafana]
+
+  roles:
+    - grafana
+
+  post_tasks:
+    - name: Wait for Grafana to be ready
+      uri:
+        url: "http://localhost:{{ grafana_port }}/api/health"
+        status_code: 200
+      register: grafana_health
+      until: grafana_health.status == 200
+      retries: 10
+      delay: 5
+
+- name: Deploy Node Exporters
+  hosts: all_servers
+  become: true
+  tags: [node_exporter]
+
+  roles:
+    - node_exporter
+
+- name: Configure Prometheus Scrape Targets
+  hosts: monitoring[0]
+  become: true
+  tags: [configure]
+
+  tasks:
+    - name: Generate Prometheus configuration
+      template:
+        src: templates/prometheus/prometheus.yml.j2
+        dest: "{{ prometheus_config_dir }}/prometheus.yml"
+        validate: promtool check config %s
+      notify: reload prometheus
+
+    - name: Copy alert rules
+      copy:
+        src: "{{ item }}"
+        dest: "{{ prometheus_rules_dir }}/"
+      loop:
+        - files/prometheus/geoip-alerts.yml
+        - files/prometheus/infrastructure-alerts.yml
+        - files/prometheus/cockroachdb-alerts.yml
+      notify: reload prometheus
+
+- name: Configure Grafana Dashboards
+  hosts: monitoring[0]
+  become: true
+  tags: [dashboards]
+
+  tasks:
+    - name: Import GeoIP dashboards
+      copy:
+        src: "{{ item }}"
+        dest: "{{ grafana_dashboards_dir }}/"
+      loop:
+        - templates/grafana/geoip-overview.json
+        - templates/grafana/geoip-hotreload.json
+        - templates/grafana/cockroachdb.json
+        - templates/grafana/kubernetes.json
+        - templates/grafana/haproxy.json
+        - templates/grafana/node-exporter.json
+      notify: restart grafana
+
+- name: Validate Monitoring Stack
+  hosts: monitoring
+  become: true
+  tags: [validate, always]
+
+  tasks:
+    - name: Check all services are running
+      systemd:
+        name: "{{ item }}"
+        state: started
+      check_mode: yes
+      loop:
+        - prometheus
+        - alertmanager
+        - grafana-server
+
+    - name: Display access information
+      debug:
+        msg: |
+          Monitoring Stack Deployed Successfully!
+
+          Access URLs:
+          - Prometheus: http://{{ ansible_host }}:{{ prometheus_port }}
+          - Alertmanager: http://{{ ansible_host }}:{{ alertmanager_port }}
+          - Grafana: http://{{ ansible_host }}:{{ grafana_port }}
+
+          Default Grafana credentials:
+          - Username: admin
+          - Password: (check vault.yml)
+      run_once: true

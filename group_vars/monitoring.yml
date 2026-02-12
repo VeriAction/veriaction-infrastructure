@@ -1,0 +1,322 @@
+---
+# Monitoring Stack Configuration
+# Prometheus + Grafana + Alertmanager on dedicated VMs
+
+###############################################################################
+# PROMETHEUS CONFIGURATION
+###############################################################################
+
+prometheus_version: "2.50.0"
+prometheus_user: prometheus
+prometheus_group: prometheus
+prometheus_port: 9090
+
+# Directories
+prometheus_base_dir: /opt/prometheus
+prometheus_config_dir: "{{ prometheus_base_dir }}/config"
+prometheus_data_dir: "{{ prometheus_base_dir }}/data"
+prometheus_rules_dir: "{{ prometheus_config_dir }}/rules"
+
+# Data retention
+prometheus_retention_time: 30d
+prometheus_retention_size: 100GB
+
+# Global Prometheus configuration
+prometheus_global_config:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+  external_labels:
+    cluster: "veriaction-{{ region }}"
+    environment: "{{ environment }}"
+
+# Scrape configurations
+prometheus_scrape_configs:
+  # Node exporters (all servers)
+  - job_name: node_exporter
+    static_configs:
+      - targets: []  # Populated from inventory
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: localhost:9090
+  
+  # CockroachDB
+  - job_name: cockroachdb
+    static_configs:
+      - targets: []  # Populated from inventory
+    metrics_path: /_status/vars
+  
+  # Kubernetes components
+  - job_name: kubernetes_api_server
+    kubernetes_sd_configs:
+      - role: endpoints
+    scheme: https
+    tls_config:
+      ca_file: /etc/prometheus/k8s-ca.crt
+      cert_file: /etc/prometheus/k8s-client.crt
+      key_file: /etc/prometheus/k8s-client.key
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: default;kubernetes;https
+  
+  # GeoIP service (via ServiceMonitor)
+  - job_name: geoip_service
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+            - veriaction
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: keep
+        regex: geoip-server
+      - source_labels: [__meta_kubernetes_pod_ip]
+        target_label: __address__
+        replacement: ${1}:9091
+  
+  # HAProxy
+  - job_name: haproxy
+    static_configs:
+      - targets: []  # Populated from inventory
+    metrics_path: /metrics
+
+# Alert rules
+prometheus_alert_rules_files:
+  - "{{ prometheus_rules_dir }}/geoip-alerts.yml"
+  - "{{ prometheus_rules_dir }}/infrastructure-alerts.yml"
+  - "{{ prometheus_rules_dir }}/cockroachdb-alerts.yml"
+
+###############################################################################
+# ALERTMANAGER CONFIGURATION
+###############################################################################
+
+alertmanager_version: "0.27.0"
+alertmanager_user: alertmanager
+alertmanager_group: alertmanager
+alertmanager_port: 9093
+
+# Directories
+alertmanager_base_dir: /opt/alertmanager
+alertmanager_config_dir: "{{ alertmanager_base_dir }}/config"
+alertmanager_data_dir: "{{ alertmanager_base_dir }}/data"
+
+# Alertmanager configuration
+alertmanager_config:
+  global:
+    resolve_timeout: 5m
+    slack_api_url: "{{ vault_slack_webhook_url }}"
+  
+  route:
+    receiver: default
+    group_by: ['alertname', 'cluster', 'service']
+    group_wait: 10s
+    group_interval: 10s
+    repeat_interval: 12h
+    routes:
+      # Critical alerts go to PagerDuty + Slack
+      - match:
+          severity: critical
+        receiver: pagerduty_critical
+        continue: true
+      - match:
+          severity: critical
+        receiver: slack_critical
+      
+      # Warning alerts go to Slack only
+      - match:
+          severity: warning
+        receiver: slack_warnings
+      
+      # GDPR compliance alerts
+      - match:
+          compliance: gdpr
+        receiver: slack_gdpr
+        continue: true
+  
+  receivers:
+    - name: default
+      slack_configs:
+        - channel: '#veriaction-alerts'
+          title: 'Alert: {{ .GroupLabels.alertname }}'
+          text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+    
+    - name: pagerduty_critical
+      pagerduty_configs:
+        - service_key: "{{ vault_pagerduty_integration_key }}"
+          description: '{{ .GroupLabels.alertname }}'
+    
+    - name: slack_critical
+      slack_configs:
+        - channel: '#veriaction-critical'
+          title: 'CRITICAL: {{ .GroupLabels.alertname }}'
+          text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+          color: danger
+    
+    - name: slack_warnings
+      slack_configs:
+        - channel: '#veriaction-warnings'
+          title: 'Warning: {{ .GroupLabels.alertname }}'
+          text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+          color: warning
+    
+    - name: slack_gdpr
+      slack_configs:
+        - channel: '#veriaction-gdpr-compliance'
+          title: 'GDPR Alert: {{ .GroupLabels.alertname }}'
+          text: '{{ range .Alerts }}{{ .Annotations.description }}{{ end }}'
+          color: '#6a1b9a'
+
+###############################################################################
+# GRAFANA CONFIGURATION
+###############################################################################
+
+grafana_version: "10.3.3"
+grafana_user: grafana
+grafana_group: grafana
+grafana_port: 3000
+
+# Directories
+grafana_base_dir: /opt/grafana
+grafana_config_dir: "{{ grafana_base_dir }}/config"
+grafana_data_dir: "{{ grafana_base_dir }}/data"
+grafana_logs_dir: "{{ grafana_base_dir }}/logs"
+grafana_plugins_dir: "{{ grafana_base_dir }}/plugins"
+grafana_dashboards_dir: "{{ grafana_base_dir }}/dashboards"
+
+# Grafana configuration
+grafana_config:
+  server:
+    http_port: "{{ grafana_port }}"
+    domain: "{{ grafana_domain | default('localhost') }}"
+    root_url: "http://{{ grafana_domain | default('localhost') }}:{{ grafana_port }}"
+    enable_gzip: true
+  
+  database:
+    type: sqlite3
+    path: "{{ grafana_data_dir }}/grafana.db"
+  
+  security:
+    admin_user: admin
+    admin_password: "{{ vault_grafana_admin_password }}"
+    secret_key: "{{ vault_grafana_secret_key }}"
+    disable_gravatar: true
+  
+  auth:
+    disable_login_form: false
+    disable_signout_menu: false
+  
+  auth_anonymous:
+    enabled: false
+  
+  smtp:
+    enabled: true
+    host: "{{ vault_smtp_host }}"
+    user: "{{ vault_smtp_user }}"
+    password: "{{ vault_smtp_password }}"
+    from_address: "grafana@veriaction.com"
+    from_name: "VeriAction Monitoring"
+  
+  alerting:
+    enabled: false  # Using Alertmanager instead
+  
+  unified_alerting:
+    enabled: false
+
+# Grafana data sources
+grafana_datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: "http://localhost:{{ prometheus_port }}"
+    is_default: true
+    json_data:
+      timeInterval: 30s
+      queryTimeout: 30s
+
+# Grafana dashboards (imported from files)
+grafana_dashboards:
+  - name: "GeoIP Service Overview"
+    source: "templates/grafana/geoip-overview.json"
+  - name: "GeoIP Hot Reload Monitoring"
+    source: "templates/grafana/geoip-hotreload.json"
+  - name: "CockroachDB Cluster"
+    source: "templates/grafana/cockroachdb.json"
+  - name: "Kubernetes Cluster"
+    source: "templates/grafana/kubernetes.json"
+  - name: "HAProxy Load Balancers"
+    source: "templates/grafana/haproxy.json"
+  - name: "Node Exporter Full"
+    source: "templates/grafana/node-exporter.json"
+
+# Grafana plugins
+grafana_plugins:
+  - grafana-clock-panel
+  - grafana-simple-json-datasource
+  - grafana-piechart-panel
+
+###############################################################################
+# NODE EXPORTER
+###############################################################################
+
+node_exporter_enabled: true
+node_exporter_enabled_collectors:
+  - systemd
+  - textfile:directory=/var/lib/node_exporter/textfile_collector
+  - filesystem:ignored-mount-points="^/(dev|proc|sys|var/lib/docker/.+)($|/)"
+  - netclass:ignored-devices="^(veth.*|docker.*|br-.*)"
+
+###############################################################################
+# BLACKBOX EXPORTER
+###############################################################################
+
+blackbox_exporter_version: "0.24.0"
+blackbox_exporter_port: 9115
+
+blackbox_exporter_modules:
+  http_2xx:
+    prober: http
+    timeout: 5s
+    http:
+      preferred_ip_protocol: ip4
+      valid_status_codes: [200]
+  
+  grpc_health:
+    prober: grpc
+    timeout: 5s
+    grpc:
+      preferred_ip_protocol: ip4
+
+###############################################################################
+# PUSHGATEWAY (Optional)
+###############################################################################
+
+pushgateway_enabled: false
+pushgateway_version: "1.7.0"
+pushgateway_port: 9091
+
+###############################################################################
+# SYSTEMD SERVICES
+###############################################################################
+
+prometheus_service_enabled: true
+alertmanager_service_enabled: true
+grafana_service_enabled: true
+
+# Service restart policies
+service_restart_policies:
+  prometheus:
+    Restart: on-failure
+    RestartSec: 5s
+  alertmanager:
+    Restart: on-failure
+    RestartSec: 5s
+  grafana:
+    Restart: on-failure
+    RestartSec: 5s

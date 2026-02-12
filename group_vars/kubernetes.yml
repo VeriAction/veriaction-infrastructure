@@ -1,0 +1,287 @@
+---
+# Kubernetes Cluster Configuration
+# Self-hosted cluster using kubeadm
+
+###############################################################################
+# VERSION & COMPONENTS
+###############################################################################
+
+kubernetes_version: "1.28.6"
+kubernetes_cni: calico
+kubernetes_cni_version: "3.27.0"
+
+# Component versions
+containerd_version: "1.7.13"
+runc_version: "1.1.12"
+crictl_version: "1.29.0"
+
+###############################################################################
+# CLUSTER CONFIGURATION
+###############################################################################
+
+# Cluster settings
+kubernetes_cluster_name: "veriaction-{{ region }}"
+kubernetes_api_server_port: 6443
+kubernetes_service_subnet: "10.96.0.0/12"
+kubernetes_pod_subnet: "10.244.0.0/16"
+
+# Control plane endpoint (HAProxy VIP for HA setups)
+kubernetes_control_plane_endpoint: "{{ groups[group_names | select('match', '.*k8s_masters.*') | first] | map('extract', hostvars, 'ansible_host') | first }}:{{ kubernetes_api_server_port }}"
+
+# Node roles
+kubernetes_node_labels:
+  masters:
+    node-role.kubernetes.io/control-plane: ""
+    node-role.kubernetes.io/master: ""
+  workers:
+    node-role.kubernetes.io/worker: ""
+
+###############################################################################
+# KUBEADM CONFIGURATION
+###############################################################################
+
+# Kubeadm init configuration
+kubeadm_init_config:
+  apiVersion: kubeadm.k8s.io/v1beta3
+  kind: ClusterConfiguration
+  kubernetesVersion: "{{ kubernetes_version }}"
+  clusterName: "{{ kubernetes_cluster_name }}"
+  controlPlaneEndpoint: "{{ kubernetes_control_plane_endpoint }}"
+  networking:
+    serviceSubnet: "{{ kubernetes_service_subnet }}"
+    podSubnet: "{{ kubernetes_pod_subnet }}"
+    dnsDomain: cluster.local
+  apiServer:
+    certSANs:
+      - localhost
+      - 127.0.0.1
+    extraArgs:
+      audit-log-path: /var/log/kubernetes/audit.log
+      audit-log-maxage: "30"
+      audit-log-maxbackup: "10"
+      audit-log-maxsize: "100"
+      enable-admission-plugins: NodeRestriction,PodSecurityPolicy
+      feature-gates: "CronJobTimeZone=true,GracefulNodeShutdown=true"
+  controllerManager:
+    extraArgs:
+      feature-gates: "CronJobTimeZone=true,GracefulNodeShutdown=true"
+      node-monitor-grace-period: "40s"
+      node-monitor-period: "5s"
+      pod-eviction-timeout: "30s"
+  scheduler:
+    extraArgs:
+      feature-gates: "CronJobTimeZone=true,GracefulNodeShutdown=true"
+
+###############################################################################
+# CONTAINER RUNTIME (containerd)
+###############################################################################
+
+containerd_config_dir: /etc/containerd
+containerd_data_dir: /var/lib/containerd
+containerd_state_dir: /run/containerd
+
+# Containerd configuration
+containerd_config:
+  version: 2
+  plugins:
+    io.containerd.grpc.v1.cri:
+      sandbox_image: "registry.k8s.io/pause:3.9"
+      systemd_cgroup: true
+      registry:
+        mirrors:
+          docker.io:
+            endpoint:
+              - "https://registry-1.docker.io"
+
+###############################################################################
+# NETWORKING (Calico)
+###############################################################################
+
+# Calico CNI configuration
+calico_manifest_url: "https://raw.githubusercontent.com/projectcalico/calico/v{{ kubernetes_cni_version }}/manifests/calico.yaml"
+calico_pod_cidr: "{{ kubernetes_pod_subnet }}"
+calico_mtu: 1440
+calico_ipip_mode: Always
+
+# Network policies
+network_policies_enabled: true
+default_deny_ingress: false  # Set to true for strict security
+
+###############################################################################
+# STORAGE CONFIGURATION
+###############################################################################
+
+# Storage classes
+storage_classes:
+  - name: local-storage
+    provisioner: kubernetes.io/no-provisioner
+    volume_binding_mode: WaitForFirstConsumer
+    is_default: true
+  - name: fast-ssd
+    provisioner: kubernetes.io/no-provisioner
+    volume_binding_mode: WaitForFirstConsumer
+    parameters:
+      type: ssd
+
+# Persistent volume directories
+pv_base_dir: /mnt/kubernetes-volumes
+
+###############################################################################
+# INGRESS CONTROLLER
+###############################################################################
+
+# NGINX Ingress Controller
+ingress_nginx_enabled: true
+ingress_nginx_version: "1.9.6"
+ingress_nginx_namespace: ingress-nginx
+ingress_nginx_service_type: LoadBalancer
+
+# Ingress configuration
+ingress_nginx_config:
+  use-proxy-protocol: "false"
+  compute-full-forwarded-for: "true"
+  use-forwarded-headers: "true"
+  enable-real-ip: "true"
+  proxy-body-size: "10m"
+
+###############################################################################
+# CERT-MANAGER
+###############################################################################
+
+cert_manager_enabled: true
+cert_manager_version: "1.14.2"
+cert_manager_namespace: cert-manager
+
+# Let's Encrypt configuration
+letsencrypt_enabled: false  # Using internal CA
+letsencrypt_email: "ops@veriaction.com"
+letsencrypt_server: "https://acme-v02.api.letsencrypt.org/directory"
+
+###############################################################################
+# METRICS SERVER
+###############################################################################
+
+metrics_server_enabled: true
+metrics_server_version: "0.7.0"
+metrics_server_args:
+  - --kubelet-insecure-tls
+  - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
+
+###############################################################################
+# KUBERNETES DASHBOARD
+###############################################################################
+
+kubernetes_dashboard_enabled: false  # Disabled for security
+kubernetes_dashboard_version: "2.7.0"
+kubernetes_dashboard_namespace: kubernetes-dashboard
+
+###############################################################################
+# NAMESPACES
+###############################################################################
+
+kubernetes_namespaces:
+  - name: veriaction
+    labels:
+      name: veriaction
+      region: "{{ region }}"
+  - name: monitoring
+    labels:
+      name: monitoring
+  - name: ingress-nginx
+    labels:
+      name: ingress-nginx
+
+###############################################################################
+# RBAC CONFIGURATION
+###############################################################################
+
+# Service accounts
+kubernetes_service_accounts:
+  - name: geoip-service
+    namespace: veriaction
+  - name: prometheus
+    namespace: monitoring
+
+# Cluster roles (defined in role templates)
+kubernetes_rbac_enabled: true
+
+###############################################################################
+# POD SECURITY POLICIES
+###############################################################################
+
+pod_security_standards:
+  privileged:
+    enforce: "privileged"
+    audit: "privileged"
+    warn: "privileged"
+  baseline:
+    enforce: "baseline"
+    audit: "restricted"
+    warn: "restricted"
+  restricted:
+    enforce: "restricted"
+    audit: "restricted"
+    warn: "restricted"
+
+# Namespace security levels
+namespace_security_levels:
+  veriaction: restricted
+  monitoring: baseline
+  ingress-nginx: privileged
+  kube-system: privileged
+
+###############################################################################
+# RESOURCE QUOTAS
+###############################################################################
+
+# Default resource quotas per namespace
+default_resource_quotas:
+  requests.cpu: "20"
+  requests.memory: "40Gi"
+  limits.cpu: "40"
+  limits.memory: "80Gi"
+  persistentvolumeclaims: "10"
+
+###############################################################################
+# AUDIT LOGGING
+###############################################################################
+
+kubernetes_audit_enabled: true
+kubernetes_audit_log_path: /var/log/kubernetes/audit.log
+kubernetes_audit_log_maxage: 30
+kubernetes_audit_log_maxbackup: 10
+kubernetes_audit_log_maxsize: 100
+
+###############################################################################
+# HIGH AVAILABILITY
+###############################################################################
+
+# etcd configuration
+etcd_data_dir: /var/lib/etcd
+etcd_initial_cluster_state: new
+
+# API server HA
+api_server_count: "{{ groups[group_names | select('match', '.*k8s_masters.*') | first] | length }}"
+api_server_endpoint_reconciler_type: lease
+
+###############################################################################
+# UPGRADE SETTINGS
+###############################################################################
+
+kubernetes_allow_upgrade: false
+kubernetes_upgrade_drain_timeout: "300s"
+kubernetes_upgrade_delete_local_data: true
+kubernetes_upgrade_ignore_daemonsets: true
+
+###############################################################################
+# NODE MAINTENANCE
+###############################################################################
+
+# Node drain settings
+node_drain_timeout: "300s"
+node_drain_grace_period: 30
+node_drain_delete_local_data: true
+node_drain_ignore_daemonsets: true
+
+# Node cordon for maintenance
+node_maintenance_mode: false

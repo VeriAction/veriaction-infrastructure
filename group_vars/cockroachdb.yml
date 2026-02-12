@@ -1,0 +1,225 @@
+---
+# CockroachDB Cluster Configuration
+# Production-ready distributed SQL database settings
+
+###############################################################################
+# VERSION & INSTALLATION
+###############################################################################
+
+cockroachdb_version: "23.2.3"
+cockroachdb_download_url: "https://binaries.cockroachdb.com/cockroach-v{{ cockroachdb_version }}.linux-amd64.tgz"
+cockroachdb_install_dir: /usr/local/bin
+cockroachdb_user: cockroach
+cockroachdb_group: cockroach
+
+###############################################################################
+# CLUSTER CONFIGURATION
+###############################################################################
+
+# Cluster settings
+cockroachdb_cluster_name: "veriaction-{{ region }}"
+cockroachdb_port: 26257
+cockroachdb_http_port: 8080
+cockroachdb_locality: "region={{ region }},zone={{ ansible_hostname }}"
+
+# Join addresses (dynamically built from inventory)
+cockroachdb_join_list: "{{ groups[group_names | select('match', '.*cockroachdb.*') | first] | map('extract', hostvars, 'ansible_host') | map('regex_replace', '^(.*)$', '\\1:' + cockroachdb_port|string) | join(',') }}"
+
+# Cache and memory settings
+cockroachdb_cache_size: "25%"  # % of system memory
+cockroachdb_max_sql_memory: "25%"
+
+###############################################################################
+# DIRECTORY STRUCTURE
+###############################################################################
+
+cockroachdb_base_dir: /var/lib/cockroach
+cockroachdb_data_dir: "{{ cockroachdb_base_dir }}/data"
+cockroachdb_logs_dir: "{{ cockroachdb_base_dir }}/logs"
+cockroachdb_certs_dir: "{{ cockroachdb_base_dir }}/certs"
+cockroachdb_ca_dir: "{{ cockroachdb_base_dir }}/ca"
+
+###############################################################################
+# SECURITY & CERTIFICATES
+###############################################################################
+
+# Certificate configuration
+cockroachdb_secure: true
+cockroachdb_ca_key_size: 4096
+cockroachdb_node_key_size: 2048
+cockroachdb_cert_validity_days: 365
+
+# Certificate paths
+cockroachdb_ca_cert: "{{ cockroachdb_certs_dir }}/ca.crt"
+cockroachdb_ca_key: "{{ cockroachdb_certs_dir }}/ca.key"
+cockroachdb_node_cert: "{{ cockroachdb_certs_dir }}/node.crt"
+cockroachdb_node_key: "{{ cockroachdb_certs_dir }}/node.key"
+cockroachdb_client_cert: "{{ cockroachdb_certs_dir }}/client.root.crt"
+cockroachdb_client_key: "{{ cockroachdb_certs_dir }}/client.root.key"
+
+###############################################################################
+# DATABASE CONFIGURATION
+###############################################################################
+
+# Databases to create
+cockroachdb_databases:
+  - name: veriaction
+    owner: veriaction_app
+  - name: audit
+    owner: veriaction_app
+  - name: config
+    owner: veriaction_app
+
+# Database users (passwords in vault.yml)
+cockroachdb_users:
+  - username: veriaction_app
+    password: "{{ vault_cockroachdb_app_password }}"
+    databases:
+      - veriaction
+      - audit
+      - config
+    privileges: ALL
+  - username: veriaction_readonly
+    password: "{{ vault_cockroachdb_readonly_password }}"
+    databases:
+      - veriaction
+      - audit
+      - config
+    privileges: SELECT
+  - username: backup_user
+    password: "{{ vault_cockroachdb_backup_password }}"
+    databases:
+      - veriaction
+      - audit
+      - config
+    privileges: BACKUP
+
+###############################################################################
+# REPLICATION & ZONES
+###############################################################################
+
+# Replication settings
+cockroachdb_default_replication_factor: 3
+cockroachdb_system_replication_factor: 5  # For system tables
+
+# Zone configurations
+cockroachdb_zones:
+  - name: default
+    replication_factor: "{{ cockroachdb_default_replication_factor }}"
+    constraints: []
+  - name: eu_data
+    replication_factor: 3
+    constraints:
+      - "+region=eu"
+    applies_to:
+      - veriaction
+      - audit
+      - config
+
+###############################################################################
+# PERFORMANCE TUNING
+###############################################################################
+
+# Connection pool settings
+cockroachdb_max_connections: 500
+cockroachdb_max_idle_connections: 100
+
+# Query settings
+cockroachdb_default_transaction_timeout: "5m"
+cockroachdb_default_statement_timeout: "1m"
+
+# Range settings
+cockroachdb_range_max_bytes: "67108864"  # 64MB
+cockroachdb_range_min_bytes: "16777216"  # 16MB
+
+###############################################################################
+# BACKUP CONFIGURATION
+###############################################################################
+
+# Backup settings
+cockroachdb_backup_enabled: true
+cockroachdb_backup_schedule: "0 2 * * *"  # Daily at 2 AM
+cockroachdb_backup_retention: "168h"  # 7 days
+cockroachdb_backup_destination: "{{ backup_s3_bucket }}/cockroachdb"
+
+# Full backup schedule
+cockroachdb_full_backup_schedule: "RECURRING '0 2 * * 0'"  # Weekly on Sunday
+cockroachdb_incremental_backup_schedule: "RECURRING '0 2 * * 1-6'"  # Daily Mon-Sat
+
+###############################################################################
+# MONITORING & METRICS
+###############################################################################
+
+# Prometheus metrics
+cockroachdb_prometheus_enabled: true
+cockroachdb_metrics_port: "{{ cockroachdb_http_port }}"
+cockroachdb_metrics_path: /_status/vars
+
+# Logging
+cockroachdb_log_level: info
+cockroachdb_log_dir: "{{ cockroachdb_logs_dir }}"
+cockroachdb_log_file_max_size: "100MiB"
+cockroachdb_log_max_group_size: "1GiB"
+
+# Audit logging
+cockroachdb_sql_audit_enabled: true
+cockroachdb_audit_log_dir: "{{ cockroachdb_logs_dir }}/audit"
+
+###############################################################################
+# CLUSTER SETTINGS (SQL)
+###############################################################################
+
+cockroachdb_cluster_settings:
+  # Performance
+  - name: kv.range_merge.queue_enabled
+    value: "true"
+  - name: sql.stats.automatic_collection.enabled
+    value: "true"
+  
+  # Security
+  - name: server.user_login.password_encryption
+    value: "scram-sha-256"
+  - name: server.user_login.timeout
+    value: "30s"
+  
+  # GDPR compliance
+  - name: sql.log.user_audit
+    value: "all"
+  - name: sql.trace.txn.enable_threshold
+    value: "1s"
+
+###############################################################################
+# HEALTH CHECK CONFIGURATION
+###############################################################################
+
+cockroachdb_health_check_enabled: true
+cockroachdb_health_check_interval: 10
+cockroachdb_health_check_timeout: 5
+cockroachdb_health_check_url: "http://localhost:{{ cockroachdb_http_port }}/health"
+
+###############################################################################
+# SYSTEMD SERVICE CONFIGURATION
+###############################################################################
+
+cockroachdb_service_enabled: true
+cockroachdb_service_state: started
+cockroachdb_restart_on_failure: true
+cockroachdb_restart_delay: 10s
+
+# Service limits
+cockroachdb_service_limits:
+  LimitNOFILE: 65536
+  LimitNPROC: 32768
+  LimitCORE: infinity
+
+###############################################################################
+# UPGRADE & MAINTENANCE
+###############################################################################
+
+# Rolling upgrade settings
+cockroachdb_upgrade_finalize_auto: false
+cockroachdb_drain_timeout: "10m"
+cockroachdb_drain_wait: "30s"
+
+# Maintenance mode
+cockroachdb_maintenance_mode: false

@@ -1,0 +1,197 @@
+---
+# GeoIP Service Deployment Playbook
+# Deploy VeriAction GeoIP service to Kubernetes with zero downtime
+#
+# Usage:
+#   ansible-playbook playbooks/deploy-geoip.yml
+#   ansible-playbook playbooks/deploy-geoip.yml --tags update
+#   ansible-playbook playbooks/deploy-geoip.yml --extra-vars "geoip_image_tag=v1.2.3"
+
+- name: Build and Push GeoIP Docker Image
+  hosts: localhost
+  gather_facts: false
+  tags: [build]
+
+  vars:
+    geoip_source_path: "/Users/stevenjob/gitrepos/GolandProjects/VeriAction-repos/veriaction-geoip"
+    geoip_image_tag: "{{ lookup('env', 'GEOIP_VERSION') | default('latest', true) }}"
+
+  tasks:
+    - name: Check if GeoIP source exists
+      stat:
+        path: "{{ geoip_source_path }}"
+      register: geoip_source
+
+    - name: Fail if source not found
+      fail:
+        msg: "GeoIP source not found at {{ geoip_source_path }}"
+      when: not geoip_source.stat.exists
+
+    - name: Build Docker image
+      community.docker.docker_image:
+        name: "{{ docker_registry }}/geoip-server"
+        tag: "{{ geoip_image_tag }}"
+        source: build
+        build:
+          path: "{{ geoip_source_path }}"
+          dockerfile: Dockerfile
+          pull: yes
+        push: yes
+        force_source: yes
+      environment:
+        DOCKER_BUILDKIT: "1"
+
+    - name: Display image info
+      debug:
+        msg: "Built and pushed {{ docker_registry }}/geoip-server:{{ geoip_image_tag }}"
+
+- name: Prepare Kubernetes Manifests
+  hosts: localhost
+  gather_facts: false
+  tags: [prepare]
+
+  tasks:
+    - name: Create temporary manifest directory
+      tempfile:
+        state: directory
+        suffix: geoip-manifests
+      register: manifest_dir
+
+    - name: Generate Kubernetes manifests from templates
+      template:
+        src: "{{ item.src }}"
+        dest: "{{ manifest_dir.path }}/{{ item.dest }}"
+      loop:
+        - { src: 'templates/kubernetes/geoip/namespace.yaml.j2', dest: 'namespace.yaml' }
+        - { src: 'templates/kubernetes/geoip/configmap.yaml.j2', dest: 'configmap.yaml' }
+        - { src: 'templates/kubernetes/geoip/secret.yaml.j2', dest: 'secret.yaml' }
+        - { src: 'templates/kubernetes/geoip/deployment.yaml.j2', dest: 'deployment.yaml' }
+        - { src: 'templates/kubernetes/geoip/service.yaml.j2', dest: 'service.yaml' }
+        - { src: 'templates/kubernetes/geoip/hpa.yaml.j2', dest: 'hpa.yaml' }
+        - { src: 'templates/kubernetes/geoip/pdb.yaml.j2', dest: 'pdb.yaml' }
+        - { src: 'templates/kubernetes/geoip/servicemonitor.yaml.j2', dest: 'servicemonitor.yaml' }
+
+    - name: Set manifest directory fact
+      set_fact:
+        geoip_manifests: "{{ manifest_dir.path }}"
+
+- name: Deploy GeoIP Service to Kubernetes
+  hosts: k8s_masters[0]
+  become: true
+  tags: [deploy, update]
+
+  tasks:
+    - name: Create veriaction namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: veriaction
+            labels:
+              name: veriaction
+              region: "{{ region }}"
+              gdpr-compliant: "{{ gdpr_compliant | default(false) | string }}"
+
+    - name: Apply ConfigMap
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ hostvars['localhost']['geoip_manifests'] }}/configmap.yaml"
+        namespace: veriaction
+
+    - name: Apply Secrets
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ hostvars['localhost']['geoip_manifests'] }}/secret.yaml"
+        namespace: veriaction
+
+    - name: Deploy GeoIP Service
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ hostvars['localhost']['geoip_manifests'] }}/deployment.yaml"
+        namespace: veriaction
+
+    - name: Create Service
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ hostvars['localhost']['geoip_manifests'] }}/service.yaml"
+        namespace: veriaction
+
+    - name: Create HorizontalPodAutoscaler
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ hostvars['localhost']['geoip_manifests'] }}/hpa.yaml"
+        namespace: veriaction
+
+    - name: Create PodDisruptionBudget
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ hostvars['localhost']['geoip_manifests'] }}/pdb.yaml"
+        namespace: veriaction
+
+    - name: Create ServiceMonitor for Prometheus
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ hostvars['localhost']['geoip_manifests'] }}/servicemonitor.yaml"
+        namespace: veriaction
+      when: prometheus_operator_enabled | default(false)
+
+    - name: Wait for deployment to be ready
+      kubernetes.core.k8s_info:
+        kind: Deployment
+        name: geoip-server
+        namespace: veriaction
+      register: deployment
+      until: >
+        deployment.resources | length > 0 and
+        deployment.resources[0].status.updatedReplicas is defined and
+        deployment.resources[0].status.updatedReplicas == deployment.resources[0].spec.replicas and
+        deployment.resources[0].status.readyReplicas is defined and
+        deployment.resources[0].status.readyReplicas == deployment.resources[0].spec.replicas
+      retries: 60
+      delay: 10
+
+- name: Validate GeoIP Deployment
+  hosts: k8s_masters[0]
+  become: true
+  tags: [validate, always]
+
+  tasks:
+    - name: Get GeoIP pods
+      command: kubectl get pods -n veriaction -l app=geoip-server
+      register: geoip_pods
+      changed_when: false
+
+    - name: Display pod status
+      debug:
+        msg: "{{ geoip_pods.stdout_lines }}"
+
+    - name: Get GeoIP service
+      command: kubectl get svc -n veriaction geoip-server
+      register: geoip_svc
+      changed_when: false
+
+    - name: Display service info
+      debug:
+        msg: "{{ geoip_svc.stdout_lines }}"
+
+    - name: Get service endpoint
+      command: kubectl get svc geoip-server -n veriaction -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+      register: service_ip
+      changed_when: false
+      failed_when: false
+
+    - name: Display deployment summary
+      debug:
+        msg: |
+          GeoIP Service Deployed Successfully!
+
+          Namespace: veriaction
+          Pods: {{ geoip_pods.stdout_lines | length }}
+          Service Type: LoadBalancer
+          Service IP: {{ service_ip.stdout | default('Pending...') }}
+
+          Verify deployment:
+          kubectl get all -n veriaction
+          kubectl logs -n veriaction -l app=geoip-server

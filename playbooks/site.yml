@@ -1,0 +1,103 @@
+---
+# VeriAction Infrastructure Master Playbook
+# Deploys complete infrastructure: CockroachDB + Kubernetes + HAProxy + GeoIP + Monitoring
+#
+# Usage:
+#   ansible-playbook playbooks/site.yml                    # Deploy everything
+#   ansible-playbook playbooks/site.yml --limit eu_region  # Deploy EU only
+#   ansible-playbook playbooks/site.yml --tags cockroachdb # Deploy only CockroachDB
+
+- name: VeriAction Infrastructure Deployment
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Display deployment banner
+      debug:
+        msg: |
+          ================================================
+          VeriAction Infrastructure Deployment
+          ================================================
+          Environment: {{ environment }}
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          ================================================
+
+# ============================================================================
+# PHASE 1: Common Setup (All Servers)
+# ============================================================================
+
+- name: Common System Setup
+  hosts: all_servers
+  become: true
+  tags: [common, always]
+  roles:
+    - common
+
+# ============================================================================
+# PHASE 2: CockroachDB Clusters (EU + Global)
+# ============================================================================
+
+- import_playbook: cockroachdb-cluster.yml
+  tags: [cockroachdb]
+
+# ============================================================================
+# PHASE 3: Kubernetes Clusters (EU + Global)
+# ============================================================================
+
+- import_playbook: kubernetes-cluster.yml
+  tags: [kubernetes]
+
+# ============================================================================
+# PHASE 4: HAProxy Load Balancers (EU + Global)
+# ============================================================================
+
+- import_playbook: haproxy-cluster.yml
+  tags: [haproxy]
+
+# ============================================================================
+# PHASE 5: Monitoring Stack
+# ============================================================================
+
+- import_playbook: monitoring-stack.yml
+  tags: [monitoring]
+
+# ============================================================================
+# PHASE 6: GeoIP Service Deployment
+# ============================================================================
+
+- import_playbook: deploy-geoip.yml
+  tags: [geoip]
+
+# ============================================================================
+# PHASE 7: Post-Deployment Validation
+# ============================================================================
+
+- name: Post-Deployment Validation
+  hosts: localhost
+  gather_facts: false
+  tags: [validate, always]
+  tasks:
+    - name: Run health checks
+      include_tasks: maintenance/health-check-all.yml
+    
+    - name: Verify GDPR compliance
+      include_tasks: maintenance/verify-gdpr-compliance.yml
+      when: environment == 'production'
+    
+    - name: Display deployment summary
+      debug:
+        msg: |
+          ================================================
+          Deployment Complete!
+          ================================================
+          CockroachDB: ✓
+          Kubernetes: ✓
+          HAProxy: ✓
+          Monitoring: ✓
+          GeoIP Service: ✓
+          ================================================
+          
+          Next Steps:
+          1. Access Grafana: http://<monitoring-ip>:3000
+          2. Verify GeoIP service: kubectl get svc -n veriaction
+          3. Check CockroachDB: cockroach node status --host=<crdb-ip>
+          ================================================

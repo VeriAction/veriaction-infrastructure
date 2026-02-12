@@ -1,0 +1,73 @@
+---
+# Kubernetes Cluster Deployment Playbook
+# Bootstrap self-hosted K8s clusters using kubeadm
+#
+# Usage:
+#   ansible-playbook playbooks/kubernetes-cluster.yml
+#   ansible-playbook playbooks/kubernetes-cluster.yml --limit eu_k8s_masters
+
+- name: Kubernetes Prerequisites
+  hosts: k8s_all
+  become: true
+  tags: [prerequisites]
+  roles:
+    - common
+    - kubernetes-prerequisites
+
+- name: Initialize Kubernetes Masters
+  hosts: k8s_masters
+  become: true
+  serial: 1
+  tags: [master]
+  roles:
+    - kubernetes-master
+
+- name: Join Kubernetes Workers
+  hosts: k8s_workers
+  become: true
+  tags: [worker]
+  roles:
+    - kubernetes-worker
+
+- name: Configure Kubernetes Networking (Calico)
+  hosts: k8s_masters[0]
+  become: true
+  tags: [networking]
+  roles:
+    - kubernetes-networking
+
+- name: Deploy Kubernetes Addons
+  hosts: k8s_masters[0]
+  become: true
+  tags: [addons]
+  roles:
+    - kubernetes-addons
+
+- name: Validate Kubernetes Cluster
+  hosts: k8s_masters[0]
+  become: true
+  tags: [validate, always]
+  tasks:
+    - name: Get cluster nodes
+      command: kubectl get nodes
+      register: nodes
+      changed_when: false
+
+    - name: Display cluster status
+      debug:
+        msg: "{{ nodes.stdout_lines }}"
+
+    - name: Verify all nodes are Ready
+      command: kubectl get nodes --no-headers
+      register: node_status
+      changed_when: false
+      failed_when: "'NotReady' in node_status.stdout"
+
+    - name: Get cluster info
+      command: kubectl cluster-info
+      register: cluster_info
+      changed_when: false
+
+    - name: Display cluster info
+      debug:
+        msg: "{{ cluster_info.stdout_lines }}"
