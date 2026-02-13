@@ -1,0 +1,31 @@
+[Unit]
+Description=MaxMind Hub - GeoIP Data Distribution Service
+Documentation=https://github.com/VeriAction/maxmind-hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=maxmind-hub
+Group=maxmind-hub
+WorkingDirectory=/opt/maxmind-hub
+EnvironmentFile=/etc/maxmind-hub/maxmind-hub.env
+ExecStart=/opt/maxmind-hub/maxmind-hub --config /etc/maxmind-hub/config.yaml
+
+Restart=always
+RestartSec=10
+TimeoutStopSec=30
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/data/maxmind /var/log/maxmind-hub
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=32768
+
+[Install]
+WantedBy=multi-user.target

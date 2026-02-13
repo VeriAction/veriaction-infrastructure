@@ -1,0 +1,48 @@
+---
+# Deploy MaxMind Hub Service
+# This playbook deploys the MaxMind data distribution hub service
+
+- name: Deploy MaxMind Hub
+  hosts: maxmind_hub
+  become: yes
+  vars_files:
+    - ../group_vars/vault.yml
+
+  pre_tasks:
+    - name: Verify MaxMind credentials are set
+      assert:
+        that:
+          - vault_maxmind_license_key is defined
+          - vault_maxmind_account_id is defined
+        fail_msg: "MaxMind credentials must be set in vault.yml"
+
+    - name: Verify hub authentication tokens are set
+      assert:
+        that:
+          - vault_hub_token_dev is defined
+          - vault_hub_token_staging is defined
+          - vault_hub_token_prod is defined
+        fail_msg: "Hub authentication tokens must be set in vault.yml"
+
+  roles:
+    - role: common
+      tags: common
+
+    - role: maxmind-hub
+      tags: maxmind-hub
+
+  post_tasks:
+    - name: Display MaxMind Hub information
+      debug:
+        msg: |
+          MaxMind Hub deployed successfully!
+
+          Access URL: https://{{ ansible_default_ipv4.address }}:8443
+          Health Check: https://{{ ansible_default_ipv4.address }}:8443/api/v1/health
+          Metrics: https://{{ ansible_default_ipv4.address }}:8443/metrics
+
+          Configuration: /etc/maxmind-hub/config.yaml
+          Data Directory: /data/maxmind
+          Logs: /var/log/maxmind-hub/
+
+          Health Check Script: /usr/local/bin/maxmind-hub-health-check.sh

@@ -1,0 +1,11 @@
+---
+# Handlers for MaxMind Hub role
+
+- name: reload systemd
+  systemd:
+    daemon_reload: yes
+
+- name: restart maxmind-hub
+  systemd:
+    name: maxmind-hub
+    state: restarted

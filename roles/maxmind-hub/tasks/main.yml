@@ -1,0 +1,251 @@
+---
+# MaxMind Hub role - Deploy MaxMind data distribution hub service
+
+- name: Create maxmind-hub user
+  user:
+    name: maxmind-hub
+    shell: /bin/bash
+    create_home: yes
+    state: present
+  tags: maxmind-hub
+
+- name: Create MaxMind Hub directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: maxmind-hub
+    group: maxmind-hub
+    mode: '0755'
+  loop:
+    - /opt/maxmind-hub
+    - /data/maxmind
+    - /data/maxmind/versions
+    - /etc/maxmind-hub
+    - /var/log/maxmind-hub
+  tags: maxmind-hub
+
+- name: Install Go compiler (for building from source)
+  package:
+    name: golang-go
+    state: present
+  when: maxmind_hub_build_from_source | default(false)
+  tags: maxmind-hub
+
+- name: Clone MaxMind Hub repository
+  git:
+    repo: "{{ maxmind_hub_repo | default('https://github.com/VeriAction/maxmind-hub.git') }}"
+    dest: /opt/maxmind-hub/src
+    version: "{{ maxmind_hub_version | default('main') }}"
+    force: yes
+  when: maxmind_hub_build_from_source | default(false)
+  become: yes
+  become_user: maxmind-hub
+  tags: maxmind-hub
+
+- name: Build MaxMind Hub binary
+  command:
+    cmd: go build -o /opt/maxmind-hub/maxmind-hub ./cmd/maxmind-hub
+    chdir: /opt/maxmind-hub/src
+  when: maxmind_hub_build_from_source | default(false)
+  become: yes
+  become_user: maxmind-hub
+  tags: maxmind-hub
+
+- name: Download pre-built MaxMind Hub binary
+  get_url:
+    url: "{{ maxmind_hub_binary_url }}"
+    dest: /opt/maxmind-hub/maxmind-hub
+    owner: maxmind-hub
+    group: maxmind-hub
+    mode: '0755'
+  when: not (maxmind_hub_build_from_source | default(false))
+  tags: maxmind-hub
+
+- name: Generate TLS certificate for MaxMind Hub
+  command: >
+    openssl req -x509 -nodes -days 365 -newkey rsa:2048
+    -keyout /etc/maxmind-hub/tls.key
+    -out /etc/maxmind-hub/tls.crt
+    -subj "/C=US/ST=State/L=City/O=VeriAction/CN={{ ansible_hostname }}"
+  args:
+    creates: /etc/maxmind-hub/tls.crt
+  when: maxmind_hub_tls_cert is not defined
+  tags:
+    - maxmind-hub
+    - tls
+
+- name: Copy provided TLS certificate
+  copy:
+    content: "{{ maxmind_hub_tls_cert }}"
+    dest: /etc/maxmind-hub/tls.crt
+    owner: maxmind-hub
+    group: maxmind-hub
+    mode: '0644'
+  when: maxmind_hub_tls_cert is defined
+  notify: restart maxmind-hub
+  tags:
+    - maxmind-hub
+    - tls
+
+- name: Copy provided TLS key
+  copy:
+    content: "{{ maxmind_hub_tls_key }}"
+    dest: /etc/maxmind-hub/tls.key
+    owner: maxmind-hub
+    group: maxmind-hub
+    mode: '0600'
+  when: maxmind_hub_tls_key is defined
+  notify: restart maxmind-hub
+  tags:
+    - maxmind-hub
+    - tls
+
+- name: Configure MaxMind Hub
+  template:
+    src: config.yaml.j2
+    dest: /etc/maxmind-hub/config.yaml
+    owner: maxmind-hub
+    group: maxmind-hub
+    mode: '0640'
+  notify: restart maxmind-hub
+  tags: maxmind-hub
+
+- name: Create environment file for MaxMind Hub
+  template:
+    src: maxmind-hub.env.j2
+    dest: /etc/maxmind-hub/maxmind-hub.env
+    owner: maxmind-hub
+    group: maxmind-hub
+    mode: '0600'
+  notify: restart maxmind-hub
+  no_log: yes
+  tags: maxmind-hub
+
+- name: Create systemd service file
+  template:
+    src: maxmind-hub.service.j2
+    dest: /etc/systemd/system/maxmind-hub.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload systemd
+  tags: maxmind-hub
+
+- name: Reload systemd daemon
+  systemd:
+    daemon_reload: yes
+  tags: maxmind-hub
+
+- name: Configure firewall for MaxMind Hub (ufw)
+  ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop:
+    - "8443"  # HTTPS API
+  when: ansible_os_family == "Debian"
+  tags:
+    - maxmind-hub
+    - firewall
+
+- name: Configure firewall for MaxMind Hub (firewalld)
+  firewalld:
+    port: "{{ item }}/tcp"
+    permanent: yes
+    state: enabled
+    immediate: yes
+  loop:
+    - "8443"
+  when: ansible_os_family == "RedHat"
+  tags:
+    - maxmind-hub
+    - firewall
+
+- name: Enable and start MaxMind Hub service
+  systemd:
+    name: maxmind-hub
+    state: started
+    enabled: yes
+  tags: maxmind-hub
+
+- name: Wait for MaxMind Hub to be ready
+  wait_for:
+    port: 8443
+    host: 127.0.0.1
+    timeout: 30
+  tags: maxmind-hub
+
+- name: Verify MaxMind Hub health
+  uri:
+    url: "https://localhost:8443/api/v1/health"
+    validate_certs: no
+    return_content: yes
+  register: hub_health
+  failed_when: hub_health.json.status != "healthy"
+  tags: maxmind-hub
+
+- name: Create MaxMind Hub download cron job
+  cron:
+    name: "MaxMind Hub automatic download"
+    minute: "0"
+    hour: "*/6"
+    job: "/opt/maxmind-hub/maxmind-hub download --check >> /var/log/maxmind-hub/download.log 2>&1"
+    user: maxmind-hub
+  when: maxmind_hub_enable_auto_download | default(true)
+  tags:
+    - maxmind-hub
+    - cron
+
+- name: Create MaxMind Hub health check script
+  copy:
+    content: |
+      #!/bin/bash
+      # MaxMind Hub health check script
+
+      echo "=== MaxMind Hub Health Check ==="
+      echo "Date: $(date)"
+      echo
+
+      # Check service status
+      if systemctl is-active --quiet maxmind-hub; then
+          echo "✓ Service: Running"
+      else
+          echo "✗ Service: Stopped"
+          exit 1
+      fi
+
+      # Check API health
+      HEALTH=$(curl -sk https://localhost:8443/api/v1/health | jq -r '.status')
+      if [ "$HEALTH" = "healthy" ]; then
+          echo "✓ API Health: $HEALTH"
+      else
+          echo "✗ API Health: $HEALTH"
+          exit 1
+      fi
+
+      # Check version count
+      VERSION_COUNT=$(curl -sk https://localhost:8443/api/v1/versions | jq '.versions | length')
+      echo "  Available versions: $VERSION_COUNT"
+
+      # Check latest version
+      LATEST=$(curl -sk https://localhost:8443/api/v1/versions/latest | jq -r '.id')
+      echo "  Latest version: $LATEST"
+
+      # Check disk usage
+      DISK_USAGE=$(du -sh /data/maxmind | cut -f1)
+      echo "  Storage usage: $DISK_USAGE"
+
+      echo
+      echo "Access URL: https://{{ ansible_default_ipv4.address }}:8443"
+    dest: /usr/local/bin/maxmind-hub-health-check.sh
+    owner: root
+    group: root
+    mode: '0755'
+  tags:
+    - maxmind-hub
+    - monitoring
+
+- name: Log successful deployment
+  debug:
+    msg: "MaxMind Hub deployed successfully at https://{{ ansible_default_ipv4.address }}:8443"
+  tags: maxmind-hub

@@ -1,0 +1,43 @@
+# MaxMind Hub Configuration - Managed by Ansible
+
+server:
+  host: "0.0.0.0"
+  port: 8443
+  tls:
+    enabled: true
+    cert_file: "/etc/maxmind-hub/tls.crt"
+    key_file: "/etc/maxmind-hub/tls.key"
+
+maxmind:
+  # License key and account ID from environment variables
+  license_key: "${MAXMIND_LICENSE_KEY}"
+  account_id: "${MAXMIND_ACCOUNT_ID}"
+
+  editions:
+    - "GeoIP2-City"
+    - "GeoIP2-Country"
+
+  # Download schedule (cron format): Every 6 hours
+  download_schedule: "0 */6 * * *"
+
+storage:
+  data_dir: "/data/maxmind"
+  retention_count: {{ maxmind_hub_retention_count | default(10) }}
+
+auth:
+  tokens:
+    - name: "dev"
+      token: "${HUB_TOKEN_DEV}"
+    - name: "staging"
+      token: "${HUB_TOKEN_STAGING}"
+    - name: "production"
+      token: "${HUB_TOKEN_PROD}"
+
+logging:
+  level: "{{ maxmind_hub_log_level | default('info') }}"
+  format: "json"
+  audit_file: "/var/log/maxmind-hub/audit.log"
+
+metrics:
+  enabled: true
+  path: "/metrics"
