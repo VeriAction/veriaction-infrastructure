@@ -1,0 +1,44 @@
+# Keepalived Configuration - Managed by Ansible
+# VIP Failover for HAProxy Load Balancers
+
+global_defs {
+    router_id {{ inventory_hostname }}
+    enable_script_security
+    script_user root
+}
+
+# Health check script for HAProxy
+vrrp_script check_haproxy {
+    script "/usr/bin/systemctl is-active haproxy"
+    interval 2
+    weight 2
+    fall 2
+    rise 2
+}
+
+# VRRP instance for VIP failover
+vrrp_instance VI_1 {
+    state {{ 'MASTER' if inventory_hostname == groups['haproxy'][0] else 'BACKUP' }}
+    interface {{ ansible_default_ipv4.interface }}
+    virtual_router_id {{ haproxy_vrrp_router_id | default('51') }}
+    priority {{ keepalived_priority }}
+    advert_int 1
+
+    authentication {
+        auth_type PASS
+        auth_pass {{ haproxy_vrrp_password | default('veriaction') }}
+    }
+
+    virtual_ipaddress {
+        {{ haproxy_vip }}/{{ haproxy_vip_netmask | default('24') }}
+    }
+
+    track_script {
+        check_haproxy
+    }
+
+    # Notifications
+    notify_master "/usr/local/bin/keepalived-notify.sh MASTER"
+    notify_backup "/usr/local/bin/keepalived-notify.sh BACKUP"
+    notify_fault "/usr/local/bin/keepalived-notify.sh FAULT"
+}

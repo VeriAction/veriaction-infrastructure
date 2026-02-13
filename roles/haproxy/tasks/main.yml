@@ -1,0 +1,259 @@
+---
+# HAProxy role - Deploy and configure HAProxy load balancer with Keepalived
+
+- name: Install HAProxy
+  package:
+    name: haproxy
+    state: present
+  tags: haproxy
+
+- name: Install Keepalived for VIP failover
+  package:
+    name: keepalived
+    state: present
+  tags:
+    - haproxy
+    - keepalived
+
+- name: Create HAProxy directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  loop:
+    - /etc/haproxy/certs
+    - /var/log/haproxy
+    - /var/lib/haproxy
+  tags: haproxy
+
+- name: Generate self-signed certificate for HAProxy (if not provided)
+  command: >
+    openssl req -x509 -nodes -days 365 -newkey rsa:2048
+    -keyout /etc/haproxy/certs/haproxy.key
+    -out /etc/haproxy/certs/haproxy.crt
+    -subj "/C=US/ST=State/L=City/O=VeriAction/CN={{ haproxy_vip }}"
+  args:
+    creates: /etc/haproxy/certs/haproxy.crt
+  when: haproxy_ssl_cert is not defined
+  tags:
+    - haproxy
+    - ssl
+
+- name: Combine certificate and key for HAProxy
+  shell: cat /etc/haproxy/certs/haproxy.crt /etc/haproxy/certs/haproxy.key > /etc/haproxy/certs/haproxy.pem
+  args:
+    creates: /etc/haproxy/certs/haproxy.pem
+  when: haproxy_ssl_cert is not defined
+  tags:
+    - haproxy
+    - ssl
+
+- name: Copy provided SSL certificate
+  copy:
+    content: "{{ haproxy_ssl_cert }}"
+    dest: /etc/haproxy/certs/haproxy.pem
+    owner: root
+    group: root
+    mode: '0600'
+  when: haproxy_ssl_cert is defined
+  notify: reload haproxy
+  tags:
+    - haproxy
+    - ssl
+
+- name: Configure HAProxy
+  template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    owner: root
+    group: root
+    mode: '0644'
+    validate: 'haproxy -c -f %s'
+  notify: reload haproxy
+  tags: haproxy
+
+- name: Enable HAProxy service
+  systemd:
+    name: haproxy
+    enabled: yes
+  tags: haproxy
+
+- name: Configure rsyslog for HAProxy
+  copy:
+    content: |
+      # HAProxy logs
+      $ModLoad imudp
+      $UDPServerAddress 127.0.0.1
+      $UDPServerRun 514
+
+      local2.* /var/log/haproxy/haproxy.log
+      & stop
+    dest: /etc/rsyslog.d/49-haproxy.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart rsyslog
+  tags:
+    - haproxy
+    - logging
+
+- name: Configure log rotation for HAProxy
+  copy:
+    content: |
+      /var/log/haproxy/*.log {
+          daily
+          rotate 30
+          compress
+          delaycompress
+          missingok
+          notifempty
+          create 0640 haproxy adm
+          sharedscripts
+          postrotate
+              /usr/bin/systemctl reload rsyslog > /dev/null 2>&1 || true
+          endscript
+      }
+    dest: /etc/logrotate.d/haproxy
+    owner: root
+    group: root
+    mode: '0644'
+  tags:
+    - haproxy
+    - logging
+
+- name: Determine Keepalived priority
+  set_fact:
+    keepalived_priority: "{{ 100 if inventory_hostname == groups['haproxy'][0] else (90 if inventory_hostname == groups['haproxy'][1] else 80) }}"
+  tags: keepalived
+
+- name: Configure Keepalived
+  template:
+    src: keepalived.conf.j2
+    dest: /etc/keepalived/keepalived.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart keepalived
+  tags: keepalived
+
+- name: Enable IP forwarding for Keepalived
+  sysctl:
+    name: net.ipv4.ip_nonlocal_bind
+    value: '1'
+    state: present
+    reload: yes
+  tags: keepalived
+
+- name: Configure firewall for HAProxy (ufw)
+  ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop:
+    - "80"     # HTTP
+    - "443"    # HTTPS
+    - "8404"   # HAProxy stats
+  when: ansible_os_family == "Debian"
+  tags:
+    - haproxy
+    - firewall
+
+- name: Configure firewall for Keepalived (ufw)
+  ufw:
+    rule: allow
+    proto: "{{ item }}"
+  loop:
+    - vrrp
+  when: ansible_os_family == "Debian"
+  tags:
+    - haproxy
+    - firewall
+
+- name: Configure firewall for HAProxy (firewalld)
+  firewalld:
+    port: "{{ item }}/tcp"
+    permanent: yes
+    state: enabled
+    immediate: yes
+  loop:
+    - "80"
+    - "443"
+    - "8404"
+  when: ansible_os_family == "RedHat"
+  tags:
+    - haproxy
+    - firewall
+
+- name: Configure firewall for Keepalived (firewalld)
+  firewalld:
+    rich_rule: 'rule protocol value="vrrp" accept'
+    permanent: yes
+    state: enabled
+    immediate: yes
+  when: ansible_os_family == "RedHat"
+  tags:
+    - haproxy
+    - firewall
+
+- name: Start HAProxy service
+  systemd:
+    name: haproxy
+    state: started
+  tags: haproxy
+
+- name: Start Keepalived service
+  systemd:
+    name: keepalived
+    state: started
+    enabled: yes
+  tags: keepalived
+
+- name: Wait for HAProxy to be ready
+  wait_for:
+    port: 8404
+    host: 127.0.0.1
+    timeout: 30
+  tags: haproxy
+
+- name: Verify HAProxy is listening on VIP
+  wait_for:
+    port: 443
+    host: "{{ haproxy_vip }}"
+    timeout: 60
+  when: inventory_hostname == groups['haproxy'][0]
+  tags: haproxy
+
+- name: Create HAProxy health check script
+  copy:
+    content: |
+      #!/bin/bash
+      # HAProxy health check script
+
+      # Check if HAProxy is running
+      systemctl is-active --quiet haproxy
+      HAPROXY_STATUS=$?
+
+      # Check if Keepalived is running
+      systemctl is-active --quiet keepalived
+      KEEPALIVED_STATUS=$?
+
+      # Check if we have the VIP
+      HAS_VIP=$(ip addr show | grep -c "{{ haproxy_vip }}")
+
+      echo "HAProxy Status: $([ $HAPROXY_STATUS -eq 0 ] && echo 'Running' || echo 'Stopped')"
+      echo "Keepalived Status: $([ $KEEPALIVED_STATUS -eq 0 ] && echo 'Running' || echo 'Stopped')"
+      echo "Has VIP: $([ $HAS_VIP -gt 0 ] && echo 'Yes' || echo 'No')"
+
+      # Check backend health
+      curl -s http://localhost:8404/stats | grep -A 1 "Backend"
+
+      exit 0
+    dest: /usr/local/bin/haproxy-health-check.sh
+    owner: root
+    group: root
+    mode: '0755'
+  tags:
+    - haproxy
+    - monitoring

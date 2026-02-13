@@ -1,0 +1,22 @@
+---
+# Handlers for HAProxy role
+
+- name: reload haproxy
+  systemd:
+    name: haproxy
+    state: reloaded
+
+- name: restart haproxy
+  systemd:
+    name: haproxy
+    state: restarted
+
+- name: restart keepalived
+  systemd:
+    name: keepalived
+    state: restarted
+
+- name: restart rsyslog
+  systemd:
+    name: rsyslog
+    state: restarted

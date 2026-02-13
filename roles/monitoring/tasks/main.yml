@@ -1,0 +1,390 @@
+---
+# Monitoring role - Deploy Prometheus, Grafana, and Alertmanager
+
+- name: Create monitoring users
+  user:
+    name: "{{ item }}"
+    shell: /bin/false
+    create_home: no
+    system: yes
+  loop:
+    - prometheus
+    - grafana
+    - alertmanager
+  tags: monitoring
+
+- name: Create Prometheus directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: prometheus
+    group: prometheus
+    mode: '0755'
+  loop:
+    - /etc/prometheus
+    - /etc/prometheus/rules
+    - /var/lib/prometheus
+    - /var/log/prometheus
+  tags:
+    - monitoring
+    - prometheus
+
+- name: Create Alertmanager directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: alertmanager
+    group: alertmanager
+    mode: '0755'
+  loop:
+    - /etc/alertmanager
+    - /var/lib/alertmanager
+  tags:
+    - monitoring
+    - alertmanager
+
+- name: Create Grafana directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: grafana
+    group: grafana
+    mode: '0755'
+  loop:
+    - /etc/grafana
+    - /var/lib/grafana
+    - /var/log/grafana
+  tags:
+    - monitoring
+    - grafana
+
+- name: Download Prometheus
+  get_url:
+    url: "https://github.com/prometheus/prometheus/releases/download/v{{ prometheus_version }}/prometheus-{{ prometheus_version }}.linux-amd64.tar.gz"
+    dest: "/tmp/prometheus-{{ prometheus_version }}.tar.gz"
+    mode: '0644'
+  tags:
+    - monitoring
+    - prometheus
+
+- name: Extract Prometheus
+  unarchive:
+    src: "/tmp/prometheus-{{ prometheus_version }}.tar.gz"
+    dest: /tmp
+    remote_src: yes
+  tags:
+    - monitoring
+    - prometheus
+
+- name: Copy Prometheus binaries
+  copy:
+    src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    owner: root
+    group: root
+    mode: '0755'
+    remote_src: yes
+  loop:
+    - prometheus
+    - promtool
+  tags:
+    - monitoring
+    - prometheus
+
+- name: Copy Prometheus console files
+  copy:
+    src: "/tmp/prometheus-{{ prometheus_version }}.linux-amd64/{{ item }}"
+    dest: "/etc/prometheus/{{ item }}"
+    owner: prometheus
+    group: prometheus
+    mode: '0644'
+    remote_src: yes
+  loop:
+    - consoles
+    - console_libraries
+  tags:
+    - monitoring
+    - prometheus
+
+- name: Download Alertmanager
+  get_url:
+    url: "https://github.com/prometheus/alertmanager/releases/download/v{{ alertmanager_version }}/alertmanager-{{ alertmanager_version }}.linux-amd64.tar.gz"
+    dest: "/tmp/alertmanager-{{ alertmanager_version }}.tar.gz"
+    mode: '0644'
+  tags:
+    - monitoring
+    - alertmanager
+
+- name: Extract Alertmanager
+  unarchive:
+    src: "/tmp/alertmanager-{{ alertmanager_version }}.tar.gz"
+    dest: /tmp
+    remote_src: yes
+  tags:
+    - monitoring
+    - alertmanager
+
+- name: Copy Alertmanager binaries
+  copy:
+    src: "/tmp/alertmanager-{{ alertmanager_version }}.linux-amd64/{{ item }}"
+    dest: "/usr/local/bin/{{ item }}"
+    owner: root
+    group: root
+    mode: '0755'
+    remote_src: yes
+  loop:
+    - alertmanager
+    - amtool
+  tags:
+    - monitoring
+    - alertmanager
+
+- name: Install Grafana repository key
+  apt_key:
+    url: https://packages.grafana.com/gpg.key
+    state: present
+  when: ansible_os_family == "Debian"
+  tags:
+    - monitoring
+    - grafana
+
+- name: Add Grafana repository
+  apt_repository:
+    repo: "deb https://packages.grafana.com/oss/deb stable main"
+    state: present
+  when: ansible_os_family == "Debian"
+  tags:
+    - monitoring
+    - grafana
+
+- name: Install Grafana
+  apt:
+    name: grafana
+    state: present
+    update_cache: yes
+  when: ansible_os_family == "Debian"
+  tags:
+    - monitoring
+    - grafana
+
+- name: Configure Prometheus
+  template:
+    src: prometheus.yml.j2
+    dest: /etc/prometheus/prometheus.yml
+    owner: prometheus
+    group: prometheus
+    mode: '0644'
+    validate: '/usr/local/bin/promtool check config %s'
+  notify: restart prometheus
+  tags:
+    - monitoring
+    - prometheus
+
+- name: Copy alert rules from veriaction-geoip
+  copy:
+    src: "{{ item.src }}"
+    dest: "/etc/prometheus/rules/{{ item.dest }}"
+    owner: prometheus
+    group: prometheus
+    mode: '0644'
+  loop:
+    - { src: '{{ playbook_dir }}/../veriaction-geoip/deployments/prometheus/hotreload-alerts.yaml', dest: 'hotreload-alerts.yaml' }
+  when: prometheus_enable_geoip_alerts | default(true)
+  notify: restart prometheus
+  tags:
+    - monitoring
+    - prometheus
+
+- name: Configure Alertmanager
+  template:
+    src: alertmanager.yml.j2
+    dest: /etc/alertmanager/alertmanager.yml
+    owner: alertmanager
+    group: alertmanager
+    mode: '0644'
+    validate: '/usr/local/bin/amtool check-config %s'
+  notify: restart alertmanager
+  tags:
+    - monitoring
+    - alertmanager
+
+- name: Configure Grafana
+  template:
+    src: grafana.ini.j2
+    dest: /etc/grafana/grafana.ini
+    owner: grafana
+    group: grafana
+    mode: '0640'
+  notify: restart grafana
+  tags:
+    - monitoring
+    - grafana
+
+- name: Create Prometheus systemd service
+  template:
+    src: prometheus.service.j2
+    dest: /etc/systemd/system/prometheus.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload systemd
+  tags:
+    - monitoring
+    - prometheus
+
+- name: Create Alertmanager systemd service
+  template:
+    src: alertmanager.service.j2
+    dest: /etc/systemd/system/alertmanager.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload systemd
+  tags:
+    - monitoring
+    - alertmanager
+
+- name: Reload systemd
+  systemd:
+    daemon_reload: yes
+  tags: monitoring
+
+- name: Configure firewall for monitoring (ufw)
+  ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop:
+    - "9090"  # Prometheus
+    - "9093"  # Alertmanager
+    - "3000"  # Grafana
+  when: ansible_os_family == "Debian"
+  tags:
+    - monitoring
+    - firewall
+
+- name: Configure firewall for monitoring (firewalld)
+  firewalld:
+    port: "{{ item }}/tcp"
+    permanent: yes
+    state: enabled
+    immediate: yes
+  loop:
+    - "9090"
+    - "9093"
+    - "3000"
+  when: ansible_os_family == "RedHat"
+  tags:
+    - monitoring
+    - firewall
+
+- name: Enable and start Prometheus
+  systemd:
+    name: prometheus
+    state: started
+    enabled: yes
+  tags:
+    - monitoring
+    - prometheus
+
+- name: Enable and start Alertmanager
+  systemd:
+    name: alertmanager
+    state: started
+    enabled: yes
+  tags:
+    - monitoring
+    - alertmanager
+
+- name: Enable and start Grafana
+  systemd:
+    name: grafana-server
+    state: started
+    enabled: yes
+  tags:
+    - monitoring
+    - grafana
+
+- name: Wait for Prometheus to be ready
+  wait_for:
+    port: 9090
+    host: 127.0.0.1
+    timeout: 30
+  tags:
+    - monitoring
+    - prometheus
+
+- name: Wait for Grafana to be ready
+  wait_for:
+    port: 3000
+    host: 127.0.0.1
+    timeout: 30
+  tags:
+    - monitoring
+    - grafana
+
+- name: Configure Grafana data source (Prometheus)
+  uri:
+    url: "http://localhost:3000/api/datasources"
+    method: POST
+    user: admin
+    password: "{{ grafana_admin_password }}"
+    force_basic_auth: yes
+    body_format: json
+    body:
+      name: "Prometheus"
+      type: "prometheus"
+      url: "http://localhost:9090"
+      access: "proxy"
+      isDefault: true
+    status_code: [200, 409]  # 409 if already exists
+  tags:
+    - monitoring
+    - grafana
+
+- name: Create monitoring health check script
+  copy:
+    content: |
+      #!/bin/bash
+      # Monitoring stack health check
+
+      echo "=== Monitoring Stack Health ==="
+      echo "Date: $(date)"
+      echo
+
+      # Check Prometheus
+      if systemctl is-active --quiet prometheus; then
+          echo "✓ Prometheus: Running"
+          PROM_TARGETS=$(curl -s http://localhost:9090/api/v1/targets | jq '.data.activeTargets | length')
+          echo "  Active targets: ${PROM_TARGETS}"
+      else
+          echo "✗ Prometheus: Stopped"
+      fi
+
+      # Check Alertmanager
+      if systemctl is-active --quiet alertmanager; then
+          echo "✓ Alertmanager: Running"
+          ALERTS=$(curl -s http://localhost:9093/api/v2/alerts | jq '. | length')
+          echo "  Active alerts: ${ALERTS}"
+      else
+          echo "✗ Alertmanager: Stopped"
+      fi
+
+      # Check Grafana
+      if systemctl is-active --quiet grafana-server; then
+          echo "✓ Grafana: Running"
+      else
+          echo "✗ Grafana: Stopped"
+      fi
+
+      echo
+      echo "Access URLs:"
+      echo "  Prometheus: http://{{ ansible_default_ipv4.address }}:9090"
+      echo "  Alertmanager: http://{{ ansible_default_ipv4.address }}:9093"
+      echo "  Grafana: http://{{ ansible_default_ipv4.address }}:3000"
+    dest: /usr/local/bin/monitoring-health-check.sh
+    owner: root
+    group: root
+    mode: '0755'
+  tags:
+    - monitoring

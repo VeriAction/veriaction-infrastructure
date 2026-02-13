@@ -1,0 +1,81 @@
+# Prometheus Configuration - Managed by Ansible
+
+global:
+  scrape_interval: {{ prometheus_scrape_interval | default('15s') }}
+  evaluation_interval: {{ prometheus_evaluation_interval | default('30s') }}
+  external_labels:
+    cluster: '{{ prometheus_cluster_name | default("veriaction") }}'
+    environment: '{{ environment | default("production") }}'
+
+# Alertmanager configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - localhost:9093
+
+# Load rules
+rule_files:
+  - "/etc/prometheus/rules/*.yaml"
+  - "/etc/prometheus/rules/*.yml"
+
+# Scrape configurations
+scrape_configs:
+  # Prometheus itself
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Alertmanager
+  - job_name: 'alertmanager'
+    static_configs:
+      - targets: ['localhost:9093']
+
+  # GeoIP service instances
+  - job_name: 'geoip'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets:
+{% for host in groups['geoip_servers'] %}
+          - '{{ hostvars[host].ansible_default_ipv4.address }}:8080'
+{% endfor %}
+
+  # CockroachDB nodes
+  - job_name: 'cockroachdb'
+    metrics_path: '/_status/vars'
+    static_configs:
+      - targets:
+{% for host in groups['cockroachdb'] %}
+          - '{{ hostvars[host].ansible_default_ipv4.address }}:8080'
+{% endfor %}
+
+  # HAProxy load balancers
+  - job_name: 'haproxy'
+    static_configs:
+      - targets:
+{% for host in groups['haproxy'] %}
+          - '{{ hostvars[host].ansible_default_ipv4.address }}:8404'
+{% endfor %}
+
+  # Node exporters (system metrics)
+  - job_name: 'node'
+    static_configs:
+      - targets:
+{% for host in groups['all'] %}
+          - '{{ hostvars[host].ansible_default_ipv4.address }}:9100'
+{% endfor %}
+
+  # Kubernetes cluster metrics (if enabled)
+{% if groups['kubernetes_masters'] is defined %}
+  - job_name: 'kubernetes-apiservers'
+    kubernetes_sd_configs:
+      - role: endpoints
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: default;kubernetes;https
+{% endif %}

@@ -1,0 +1,54 @@
+# Alertmanager Configuration - Managed by Ansible
+
+global:
+  resolve_timeout: 5m
+
+# Route configuration
+route:
+  group_by: ['alertname', 'cluster', 'service']
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 12h
+  receiver: 'default'
+
+  routes:
+    # Critical alerts
+    - match:
+        severity: critical
+      receiver: 'pagerduty'
+      continue: true
+
+    # Warning alerts
+    - match:
+        severity: warning
+      receiver: 'slack'
+
+# Receivers
+receivers:
+  - name: 'default'
+    webhook_configs:
+      - url: 'http://localhost:5001/'
+
+{% if alertmanager_pagerduty_key is defined %}
+  - name: 'pagerduty'
+    pagerduty_configs:
+      - service_key: '{{ alertmanager_pagerduty_key }}'
+        description: 'Alert: {{`{{ .GroupLabels.alertname }}`}}'
+{% endif %}
+
+{% if alertmanager_slack_webhook is defined %}
+  - name: 'slack'
+    slack_configs:
+      - api_url: '{{ alertmanager_slack_webhook }}'
+        channel: '#{{ alertmanager_slack_channel | default("alerts") }}'
+        title: 'Alert: {{`{{ .GroupLabels.alertname }}`}}'
+        text: '{{`{{ range .Alerts }}{{ .Annotations.description }}{{ end }}`}}'
+{% endif %}
+
+# Inhibition rules
+inhibit_rules:
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'instance']
