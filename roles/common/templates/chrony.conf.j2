@@ -1,0 +1,32 @@
+# Chrony configuration - Managed by Ansible
+# NTP servers
+{% if ntp_servers is defined %}
+{% for server in ntp_servers %}
+server {{ server }} iburst
+{% endfor %}
+{% else %}
+# Use public NTP servers
+server 0.pool.ntp.org iburst
+server 1.pool.ntp.org iburst
+server 2.pool.ntp.org iburst
+server 3.pool.ntp.org iburst
+{% endif %}
+
+# Record the rate at which the system clock gains/losses time
+driftfile /var/lib/chrony/drift
+
+# Allow the system clock to be stepped in the first three updates
+# if its offset is larger than 1 second
+makestep 1.0 3
+
+# Enable kernel synchronization of the real-time clock (RTC)
+rtcsync
+
+# Serve time even if not synchronized to a time source
+local stratum 10
+
+# Specify directory for log files
+logdir /var/log/chrony
+
+# Select which information is logged
+#log measurements statistics tracking

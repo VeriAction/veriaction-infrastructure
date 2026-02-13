@@ -1,0 +1,374 @@
+---
+# Common role - Base system setup for all servers
+
+- name: Update apt cache (Debian/Ubuntu)
+  apt:
+    update_cache: yes
+    cache_valid_time: 3600
+  when: ansible_os_family == "Debian"
+  tags: packages
+
+- name: Upgrade all packages (Debian/Ubuntu)
+  apt:
+    upgrade: dist
+    autoremove: yes
+    autoclean: yes
+  when: ansible_os_family == "Debian"
+  tags: packages
+
+- name: Update yum cache (RHEL/CentOS)
+  yum:
+    update_cache: yes
+  when: ansible_os_family == "RedHat"
+  tags: packages
+
+- name: Upgrade all packages (RHEL/CentOS)
+  yum:
+    name: "*"
+    state: latest
+  when: ansible_os_family == "RedHat"
+  tags: packages
+
+- name: Install essential packages
+  package:
+    name:
+      - curl
+      - wget
+      - git
+      - vim
+      - net-tools
+      - htop
+      - iotop
+      - sysstat
+      - ncdu
+      - tmux
+      - rsync
+      - jq
+      - unzip
+    state: present
+  tags: packages
+
+- name: Install chrony for time synchronization (Debian/Ubuntu)
+  apt:
+    name: chrony
+    state: present
+  when: ansible_os_family == "Debian"
+  tags: ntp
+
+- name: Install chrony for time synchronization (RHEL/CentOS)
+  yum:
+    name: chrony
+    state: present
+  when: ansible_os_family == "RedHat"
+  tags: ntp
+
+- name: Configure chrony
+  template:
+    src: chrony.conf.j2
+    dest: /etc/chrony/chrony.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart chrony
+  tags: ntp
+
+- name: Enable and start chrony
+  systemd:
+    name: chronyd
+    state: started
+    enabled: yes
+  tags: ntp
+
+- name: Set timezone to UTC
+  timezone:
+    name: UTC
+  tags: timezone
+
+- name: Install firewall (ufw for Debian)
+  apt:
+    name: ufw
+    state: present
+  when: ansible_os_family == "Debian"
+  tags: firewall
+
+- name: Install firewall (firewalld for RHEL)
+  yum:
+    name: firewalld
+    state: present
+  when: ansible_os_family == "RedHat"
+  tags: firewall
+
+- name: Configure ufw default policies
+  ufw:
+    direction: "{{ item.direction }}"
+    policy: "{{ item.policy }}"
+  with_items:
+    - { direction: 'incoming', policy: 'deny' }
+    - { direction: 'outgoing', policy: 'allow' }
+  when: ansible_os_family == "Debian"
+  tags: firewall
+
+- name: Allow SSH through ufw
+  ufw:
+    rule: allow
+    port: "{{ ssh_port | default('22') }}"
+    proto: tcp
+  when: ansible_os_family == "Debian"
+  tags: firewall
+
+- name: Enable ufw
+  ufw:
+    state: enabled
+  when: ansible_os_family == "Debian"
+  tags: firewall
+
+- name: Enable and start firewalld
+  systemd:
+    name: firewalld
+    state: started
+    enabled: yes
+  when: ansible_os_family == "RedHat"
+  tags: firewall
+
+- name: Allow SSH through firewalld
+  firewalld:
+    service: ssh
+    permanent: yes
+    state: enabled
+    immediate: yes
+  when: ansible_os_family == "RedHat"
+  tags: firewall
+
+- name: Create admin user
+  user:
+    name: "{{ admin_user }}"
+    shell: /bin/bash
+    groups: "{{ 'sudo' if ansible_os_family == 'Debian' else 'wheel' }}"
+    append: yes
+    create_home: yes
+    state: present
+  when: admin_user is defined
+  tags: users
+
+- name: Set up authorized keys for admin user
+  authorized_key:
+    user: "{{ admin_user }}"
+    key: "{{ admin_ssh_key }}"
+    state: present
+  when: admin_user is defined and admin_ssh_key is defined
+  tags: users
+
+- name: Allow admin user sudo without password
+  lineinfile:
+    path: /etc/sudoers.d/{{ admin_user }}
+    line: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL"
+    create: yes
+    mode: '0440'
+    validate: 'visudo -cf %s'
+  when: admin_user is defined
+  tags: users
+
+- name: Harden SSH configuration - Disable root login
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?PermitRootLogin'
+    line: 'PermitRootLogin no'
+    validate: '/usr/sbin/sshd -t -f %s'
+  notify: restart sshd
+  tags: ssh
+
+- name: Harden SSH configuration - Disable password authentication
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?PasswordAuthentication'
+    line: 'PasswordAuthentication no'
+    validate: '/usr/sbin/sshd -t -f %s'
+  notify: restart sshd
+  tags: ssh
+
+- name: Harden SSH configuration - Enable public key authentication
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?PubkeyAuthentication'
+    line: 'PubkeyAuthentication yes'
+    validate: '/usr/sbin/sshd -t -f %s'
+  notify: restart sshd
+  tags: ssh
+
+- name: Harden SSH configuration - Disable empty passwords
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?PermitEmptyPasswords'
+    line: 'PermitEmptyPasswords no'
+    validate: '/usr/sbin/sshd -t -f %s'
+  notify: restart sshd
+  tags: ssh
+
+- name: Harden SSH configuration - Set MaxAuthTries
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?MaxAuthTries'
+    line: 'MaxAuthTries 3'
+    validate: '/usr/sbin/sshd -t -f %s'
+  notify: restart sshd
+  tags: ssh
+
+- name: Harden SSH configuration - Set ClientAliveInterval
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?ClientAliveInterval'
+    line: 'ClientAliveInterval 300'
+    validate: '/usr/sbin/sshd -t -f %s'
+  notify: restart sshd
+  tags: ssh
+
+- name: Harden SSH configuration - Set ClientAliveCountMax
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?ClientAliveCountMax'
+    line: 'ClientAliveCountMax 2'
+    validate: '/usr/sbin/sshd -t -f %s'
+  notify: restart sshd
+  tags: ssh
+
+- name: Configure kernel parameters for production
+  sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: yes
+    sysctl_file: /etc/sysctl.d/99-production.conf
+  loop:
+    - { name: 'fs.file-max', value: '1048576' }
+    - { name: 'fs.inotify.max_user_watches', value: '524288' }
+    - { name: 'net.core.netdev_max_backlog', value: '30000' }
+    - { name: 'net.core.rmem_max', value: '134217728' }
+    - { name: 'net.core.wmem_max', value: '134217728' }
+    - { name: 'net.core.somaxconn', value: '65535' }
+    - { name: 'net.ipv4.tcp_max_syn_backlog', value: '20480' }
+    - { name: 'net.ipv4.tcp_rmem', value: '4096 87380 67108864' }
+    - { name: 'net.ipv4.tcp_wmem', value: '4096 65536 67108864' }
+    - { name: 'net.ipv4.tcp_fin_timeout', value: '30' }
+    - { name: 'net.ipv4.tcp_keepalive_time', value: '600' }
+    - { name: 'net.ipv4.tcp_keepalive_probes', value: '3' }
+    - { name: 'net.ipv4.tcp_keepalive_intvl', value: '15' }
+    - { name: 'net.ipv4.ip_local_port_range', value: '1024 65535' }
+    - { name: 'net.nf_conntrack_max', value: '1048576' }
+    - { name: 'vm.swappiness', value: '10' }
+    - { name: 'vm.dirty_ratio', value: '15' }
+    - { name: 'vm.dirty_background_ratio', value: '5' }
+  tags: sysctl
+
+- name: Set system-wide ulimits
+  pam_limits:
+    domain: '*'
+    limit_type: "{{ item.type }}"
+    limit_item: "{{ item.item }}"
+    value: "{{ item.value }}"
+  loop:
+    - { type: 'soft', item: 'nofile', value: '65536' }
+    - { type: 'hard', item: 'nofile', value: '1048576' }
+    - { type: 'soft', item: 'nproc', value: '32768' }
+    - { type: 'hard', item: 'nproc', value: '65536' }
+  tags: ulimits
+
+- name: Configure log rotation
+  copy:
+    content: |
+      # System log rotation
+      /var/log/*.log {
+          daily
+          rotate 14
+          compress
+          delaycompress
+          missingok
+          notifempty
+          create 0640 root adm
+          sharedscripts
+      }
+
+      /var/log/syslog {
+          daily
+          rotate 7
+          compress
+          delaycompress
+          missingok
+          notifempty
+          postrotate
+              /usr/lib/rsyslog/rsyslog-rotate
+          endscript
+      }
+    dest: /etc/logrotate.d/system-logs
+    owner: root
+    group: root
+    mode: '0644'
+  tags: logrotate
+
+- name: Install fail2ban
+  package:
+    name: fail2ban
+    state: present
+  tags: fail2ban
+
+- name: Configure fail2ban for SSH
+  copy:
+    content: |
+      [sshd]
+      enabled = true
+      port = {{ ssh_port | default('22') }}
+      filter = sshd
+      logpath = /var/log/auth.log
+      maxretry = 3
+      bantime = 3600
+      findtime = 600
+    dest: /etc/fail2ban/jail.d/sshd.conf
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart fail2ban
+  tags: fail2ban
+
+- name: Enable and start fail2ban
+  systemd:
+    name: fail2ban
+    state: started
+    enabled: yes
+  tags: fail2ban
+
+- name: Create system monitoring script directory
+  file:
+    path: /opt/monitoring
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  tags: monitoring
+
+- name: Install system health check script
+  copy:
+    content: |
+      #!/bin/bash
+      # System health check script
+
+      echo "=== System Health Check ==="
+      echo "Date: $(date)"
+      echo
+      echo "Load Average:"
+      uptime
+      echo
+      echo "Memory Usage:"
+      free -h
+      echo
+      echo "Disk Usage:"
+      df -h / | tail -n 1
+      echo
+      echo "Top Processes (CPU):"
+      ps aux --sort=-%cpu | head -n 6
+      echo
+      echo "Top Processes (Memory):"
+      ps aux --sort=-%mem | head -n 6
+    dest: /opt/monitoring/health-check.sh
+    owner: root
+    group: root
+    mode: '0755'
+  tags: monitoring

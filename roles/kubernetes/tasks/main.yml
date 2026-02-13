@@ -1,0 +1,348 @@
+---
+# Kubernetes role - Deploy and configure Kubernetes cluster
+
+- name: Disable swap
+  command: swapoff -a
+  when: ansible_swaptotal_mb > 0
+  tags: kubernetes
+
+- name: Remove swap from /etc/fstab
+  lineinfile:
+    path: /etc/fstab
+    regexp: '^/.*swap'
+    state: absent
+  tags: kubernetes
+
+- name: Load kernel modules
+  modprobe:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - overlay
+    - br_netfilter
+  tags: kubernetes
+
+- name: Persist kernel modules
+  copy:
+    content: |
+      overlay
+      br_netfilter
+    dest: /etc/modules-load.d/kubernetes.conf
+    owner: root
+    group: root
+    mode: '0644'
+  tags: kubernetes
+
+- name: Configure sysctl for Kubernetes
+  sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: yes
+    sysctl_file: /etc/sysctl.d/99-kubernetes.conf
+  loop:
+    - { name: 'net.bridge.bridge-nf-call-iptables', value: '1' }
+    - { name: 'net.bridge.bridge-nf-call-ip6tables', value: '1' }
+    - { name: 'net.ipv4.ip_forward', value: '1' }
+  tags: kubernetes
+
+- name: Install containerd dependencies
+  package:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+    state: present
+  when: ansible_os_family == "Debian"
+  tags: kubernetes
+
+- name: Add Docker GPG key (for containerd)
+  apt_key:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    state: present
+  when: ansible_os_family == "Debian"
+  tags: kubernetes
+
+- name: Add Docker repository
+  apt_repository:
+    repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+    state: present
+  when: ansible_os_family == "Debian"
+  tags: kubernetes
+
+- name: Install containerd
+  package:
+    name: containerd.io
+    state: present
+  tags: kubernetes
+
+- name: Create containerd config directory
+  file:
+    path: /etc/containerd
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  tags: kubernetes
+
+- name: Generate default containerd config
+  shell: containerd config default > /etc/containerd/config.toml
+  args:
+    creates: /etc/containerd/config.toml
+  tags: kubernetes
+
+- name: Configure containerd to use systemd cgroup driver
+  lineinfile:
+    path: /etc/containerd/config.toml
+    regexp: '^(\s+)SystemdCgroup = false'
+    line: '\1SystemdCgroup = true'
+    backrefs: yes
+  notify: restart containerd
+  tags: kubernetes
+
+- name: Enable and start containerd
+  systemd:
+    name: containerd
+    state: started
+    enabled: yes
+  tags: kubernetes
+
+- name: Add Kubernetes GPG key
+  apt_key:
+    url: https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/Release.key
+    state: present
+  when: ansible_os_family == "Debian"
+  tags: kubernetes
+
+- name: Add Kubernetes repository
+  apt_repository:
+    repo: "deb https://pkgs.k8s.io/core:/stable:/v{{ kubernetes_version }}/deb/ /"
+    state: present
+  when: ansible_os_family == "Debian"
+  tags: kubernetes
+
+- name: Install Kubernetes packages
+  package:
+    name:
+      - kubelet={{ kubernetes_version }}.*
+      - kubeadm={{ kubernetes_version }}.*
+      - kubectl={{ kubernetes_version }}.*
+    state: present
+  tags: kubernetes
+
+- name: Hold Kubernetes packages at current version
+  dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+    - kubelet
+    - kubeadm
+    - kubectl
+  when: ansible_os_family == "Debian"
+  tags: kubernetes
+
+- name: Configure firewall for Kubernetes control plane (ufw)
+  ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop:
+    - "6443"   # Kubernetes API server
+    - "2379"   # etcd server client API
+    - "2380"   # etcd server peer API
+    - "10250"  # Kubelet API
+    - "10251"  # kube-scheduler
+    - "10252"  # kube-controller-manager
+  when: ansible_os_family == "Debian" and inventory_hostname in groups['kubernetes_masters']
+  tags:
+    - kubernetes
+    - firewall
+
+- name: Configure firewall for Kubernetes workers (ufw)
+  ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop:
+    - "10250"      # Kubelet API
+    - "30000:32767" # NodePort Services
+  when: ansible_os_family == "Debian" and inventory_hostname in groups['kubernetes_workers']
+  tags:
+    - kubernetes
+    - firewall
+
+- name: Check if Kubernetes is already initialized
+  stat:
+    path: /etc/kubernetes/admin.conf
+  register: k8s_admin_conf
+  when: inventory_hostname == groups['kubernetes_masters'][0]
+  tags: kubernetes
+
+- name: Initialize Kubernetes control plane
+  command: >
+    kubeadm init
+    --pod-network-cidr={{ kubernetes_pod_network_cidr }}
+    --service-cidr={{ kubernetes_service_cidr }}
+    --apiserver-advertise-address={{ ansible_default_ipv4.address }}
+    --control-plane-endpoint={{ kubernetes_control_plane_endpoint }}
+    --upload-certs
+  when: >
+    inventory_hostname == groups['kubernetes_masters'][0]
+    and not k8s_admin_conf.stat.exists
+  register: kubeadm_init
+  tags: kubernetes
+
+- name: Create .kube directory for root
+  file:
+    path: /root/.kube
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+  when: inventory_hostname in groups['kubernetes_masters']
+  tags: kubernetes
+
+- name: Copy admin.conf to root's kube config
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /root/.kube/config
+    owner: root
+    group: root
+    mode: '0600'
+    remote_src: yes
+  when: inventory_hostname in groups['kubernetes_masters']
+  tags: kubernetes
+
+- name: Get kubeadm join command for workers
+  command: kubeadm token create --print-join-command
+  register: k8s_join_command
+  when: inventory_hostname == groups['kubernetes_masters'][0]
+  changed_when: false
+  tags: kubernetes
+
+- name: Save join command to local file
+  copy:
+    content: "{{ k8s_join_command.stdout }}"
+    dest: /tmp/k8s-join-command
+  delegate_to: localhost
+  when: inventory_hostname == groups['kubernetes_masters'][0]
+  tags: kubernetes
+
+- name: Copy join command to workers
+  copy:
+    src: /tmp/k8s-join-command
+    dest: /tmp/k8s-join-command
+    mode: '0755'
+  when: inventory_hostname in groups['kubernetes_workers']
+  tags: kubernetes
+
+- name: Join worker nodes to cluster
+  command: sh /tmp/k8s-join-command
+  args:
+    creates: /etc/kubernetes/kubelet.conf
+  when: inventory_hostname in groups['kubernetes_workers']
+  tags: kubernetes
+
+- name: Install Calico CNI
+  command: kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v{{ calico_version }}/manifests/calico.yaml
+  when: inventory_hostname == groups['kubernetes_masters'][0]
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: calico_install
+  changed_when: "'created' in calico_install.stdout or 'configured' in calico_install.stdout"
+  tags:
+    - kubernetes
+    - cni
+
+- name: Wait for all nodes to be ready
+  command: kubectl get nodes
+  register: kubectl_nodes
+  until: kubectl_nodes.stdout.find("NotReady") == -1
+  retries: 30
+  delay: 10
+  when: inventory_hostname == groups['kubernetes_masters'][0]
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  changed_when: false
+  tags: kubernetes
+
+- name: Create namespace for VeriAction applications
+  command: kubectl create namespace veriaction
+  when: inventory_hostname == groups['kubernetes_masters'][0]
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: ns_create
+  failed_when: ns_create.rc != 0 and 'AlreadyExists' not in ns_create.stderr
+  changed_when: ns_create.rc == 0
+  tags: kubernetes
+
+- name: Install Kubernetes metrics-server
+  command: kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+  when: inventory_hostname == groups['kubernetes_masters'][0]
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: metrics_server
+  changed_when: "'created' in metrics_server.stdout or 'configured' in metrics_server.stdout"
+  tags:
+    - kubernetes
+    - monitoring
+
+- name: Configure RBAC for VeriAction namespace
+  copy:
+    content: |
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: veriaction-deployer
+        namespace: veriaction
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: veriaction-deployer
+        namespace: veriaction
+      rules:
+      - apiGroups: ["", "apps", "batch"]
+        resources: ["*"]
+        verbs: ["*"]
+      ---
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: veriaction-deployer
+        namespace: veriaction
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: Role
+        name: veriaction-deployer
+      subjects:
+      - kind: ServiceAccount
+        name: veriaction-deployer
+        namespace: veriaction
+    dest: /tmp/veriaction-rbac.yaml
+  when: inventory_hostname == groups['kubernetes_masters'][0]
+  tags:
+    - kubernetes
+    - rbac
+
+- name: Apply RBAC configuration
+  command: kubectl apply -f /tmp/veriaction-rbac.yaml
+  when: inventory_hostname == groups['kubernetes_masters'][0]
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: rbac_apply
+  changed_when: "'created' in rbac_apply.stdout or 'configured' in rbac_apply.stdout"
+  tags:
+    - kubernetes
+    - rbac
+
+- name: Verify cluster status
+  command: kubectl cluster-info
+  when: inventory_hostname == groups['kubernetes_masters'][0]
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: cluster_info
+  changed_when: false
+  tags: kubernetes

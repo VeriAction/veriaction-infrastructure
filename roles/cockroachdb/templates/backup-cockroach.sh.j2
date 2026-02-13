@@ -1,0 +1,62 @@
+#!/bin/bash
+# CockroachDB backup script - Managed by Ansible
+
+set -euo pipefail
+
+BACKUP_DIR="{{ cockroachdb_backup_dir }}"
+CERTS_DIR="/etc/cockroach/certs"
+HOST="localhost:26257"
+DATABASE="{{ cockroachdb_app_database }}"
+RETENTION_DAYS=14
+
+# Create timestamp
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+BACKUP_PATH="${BACKUP_DIR}/${TIMESTAMP}"
+
+echo "[$(date)] Starting CockroachDB backup..."
+
+# Create backup directory
+mkdir -p "${BACKUP_PATH}"
+
+# Perform backup using SQL dump
+/usr/local/bin/cockroach dump "${DATABASE}" \
+  --certs-dir="${CERTS_DIR}" \
+  --host="${HOST}" \
+  > "${BACKUP_PATH}/${DATABASE}.sql"
+
+# Compress backup
+gzip "${BACKUP_PATH}/${DATABASE}.sql"
+
+echo "[$(date)] Backup completed: ${BACKUP_PATH}/${DATABASE}.sql.gz"
+
+# Calculate backup size
+BACKUP_SIZE=$(du -sh "${BACKUP_PATH}" | cut -f1)
+echo "[$(date)] Backup size: ${BACKUP_SIZE}"
+
+# Clean up old backups
+echo "[$(date)] Cleaning up backups older than ${RETENTION_DAYS} days..."
+find "${BACKUP_DIR}" -type d -mtime +${RETENTION_DAYS} -exec rm -rf {} + || true
+
+# Verify backup integrity
+if [ -f "${BACKUP_PATH}/${DATABASE}.sql.gz" ]; then
+    gunzip -t "${BACKUP_PATH}/${DATABASE}.sql.gz" && \
+        echo "[$(date)] Backup verification successful" || \
+        echo "[$(date)] ERROR: Backup verification failed!"
+fi
+
+echo "[$(date)] Backup script completed"
+
+# Optional: Upload to S3/GCS if configured
+{% if cockroachdb_backup_upload_enabled | default(false) %}
+echo "[$(date)] Uploading backup to cloud storage..."
+{% if cockroachdb_backup_storage_type == 's3' %}
+aws s3 cp "${BACKUP_PATH}/${DATABASE}.sql.gz" \
+  "s3://{{ cockroachdb_backup_s3_bucket }}/{{ inventory_hostname }}/${TIMESTAMP}/${DATABASE}.sql.gz"
+{% elif cockroachdb_backup_storage_type == 'gcs' %}
+gsutil cp "${BACKUP_PATH}/${DATABASE}.sql.gz" \
+  "gs://{{ cockroachdb_backup_gcs_bucket }}/{{ inventory_hostname }}/${TIMESTAMP}/${DATABASE}.sql.gz"
+{% endif %}
+echo "[$(date)] Cloud upload completed"
+{% endif %}
+
+exit 0

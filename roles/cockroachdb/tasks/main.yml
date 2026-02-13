@@ -1,0 +1,374 @@
+---
+# CockroachDB role - Deploy and configure CockroachDB cluster
+
+- name: Create cockroach user
+  user:
+    name: cockroach
+    shell: /bin/bash
+    create_home: yes
+    state: present
+  tags: cockroachdb
+
+- name: Create CockroachDB directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: cockroach
+    group: cockroach
+    mode: '0755'
+  loop:
+    - /opt/cockroachdb
+    - /var/lib/cockroach
+    - /var/log/cockroach
+    - /etc/cockroach/certs
+  tags: cockroachdb
+
+- name: Download CockroachDB binary
+  get_url:
+    url: "https://binaries.cockroachdb.com/cockroach-v{{ cockroachdb_version }}.linux-amd64.tgz"
+    dest: "/tmp/cockroach-v{{ cockroachdb_version }}.linux-amd64.tgz"
+    mode: '0644'
+  tags: cockroachdb
+
+- name: Extract CockroachDB binary
+  unarchive:
+    src: "/tmp/cockroach-v{{ cockroachdb_version }}.linux-amd64.tgz"
+    dest: /tmp
+    remote_src: yes
+  tags: cockroachdb
+
+- name: Copy cockroach binary to /usr/local/bin
+  copy:
+    src: "/tmp/cockroach-v{{ cockroachdb_version }}.linux-amd64/cockroach"
+    dest: /usr/local/bin/cockroach
+    owner: root
+    group: root
+    mode: '0755'
+    remote_src: yes
+  tags: cockroachdb
+
+- name: Verify cockroach binary
+  command: /usr/local/bin/cockroach version
+  register: cockroach_version_check
+  changed_when: false
+  tags: cockroachdb
+
+- name: Generate CA certificate (first node only)
+  command: >
+    /usr/local/bin/cockroach cert create-ca
+    --certs-dir=/etc/cockroach/certs
+    --ca-key=/etc/cockroach/certs/ca.key
+  args:
+    creates: /etc/cockroach/certs/ca.crt
+  when: inventory_hostname == groups['cockroachdb'][0]
+  become: yes
+  become_user: cockroach
+  tags:
+    - cockroachdb
+    - certs
+
+- name: Generate node certificate
+  command: >
+    /usr/local/bin/cockroach cert create-node
+    {{ inventory_hostname }}
+    {{ ansible_default_ipv4.address }}
+    localhost
+    127.0.0.1
+    --certs-dir=/etc/cockroach/certs
+    --ca-key=/etc/cockroach/certs/ca.key
+  args:
+    creates: /etc/cockroach/certs/node.crt
+  become: yes
+  become_user: cockroach
+  tags:
+    - cockroachdb
+    - certs
+
+- name: Generate client certificate for root user
+  command: >
+    /usr/local/bin/cockroach cert create-client root
+    --certs-dir=/etc/cockroach/certs
+    --ca-key=/etc/cockroach/certs/ca.key
+  args:
+    creates: /etc/cockroach/certs/client.root.crt
+  when: inventory_hostname == groups['cockroachdb'][0]
+  become: yes
+  become_user: cockroach
+  tags:
+    - cockroachdb
+    - certs
+
+- name: Set correct permissions on certificates
+  file:
+    path: /etc/cockroach/certs
+    owner: cockroach
+    group: cockroach
+    recurse: yes
+    mode: '0700'
+  tags:
+    - cockroachdb
+    - certs
+
+- name: Fetch CA certificate from first node
+  fetch:
+    src: /etc/cockroach/certs/ca.crt
+    dest: /tmp/cockroach-ca.crt
+    flat: yes
+  when: inventory_hostname == groups['cockroachdb'][0]
+  tags:
+    - cockroachdb
+    - certs
+
+- name: Fetch CA key from first node
+  fetch:
+    src: /etc/cockroach/certs/ca.key
+    dest: /tmp/cockroach-ca.key
+    flat: yes
+  when: inventory_hostname == groups['cockroachdb'][0]
+  tags:
+    - cockroachdb
+    - certs
+
+- name: Copy CA certificate to other nodes
+  copy:
+    src: /tmp/cockroach-ca.crt
+    dest: /etc/cockroach/certs/ca.crt
+    owner: cockroach
+    group: cockroach
+    mode: '0600'
+  when: inventory_hostname != groups['cockroachdb'][0]
+  tags:
+    - cockroachdb
+    - certs
+
+- name: Copy CA key to other nodes
+  copy:
+    src: /tmp/cockroach-ca.key
+    dest: /etc/cockroach/certs/ca.key
+    owner: cockroach
+    group: cockroach
+    mode: '0600'
+  when: inventory_hostname != groups['cockroachdb'][0]
+  tags:
+    - cockroachdb
+    - certs
+
+- name: Configure firewall for CockroachDB (ufw)
+  ufw:
+    rule: allow
+    port: "{{ item }}"
+    proto: tcp
+  loop:
+    - "26257"  # Inter-node and client connections
+    - "8080"   # HTTP console
+  when: ansible_os_family == "Debian"
+  tags:
+    - cockroachdb
+    - firewall
+
+- name: Configure firewall for CockroachDB (firewalld)
+  firewalld:
+    port: "{{ item }}/tcp"
+    permanent: yes
+    state: enabled
+    immediate: yes
+  loop:
+    - "26257"
+    - "8080"
+  when: ansible_os_family == "RedHat"
+  tags:
+    - cockroachdb
+    - firewall
+
+- name: Create systemd service file
+  template:
+    src: cockroachdb.service.j2
+    dest: /etc/systemd/system/cockroachdb.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload systemd
+  tags: cockroachdb
+
+- name: Reload systemd daemon
+  systemd:
+    daemon_reload: yes
+  tags: cockroachdb
+
+- name: Enable CockroachDB service
+  systemd:
+    name: cockroachdb
+    enabled: yes
+  tags: cockroachdb
+
+- name: Start CockroachDB on first node
+  systemd:
+    name: cockroachdb
+    state: started
+  when: inventory_hostname == groups['cockroachdb'][0]
+  tags: cockroachdb
+
+- name: Wait for first node to be ready
+  wait_for:
+    host: "{{ hostvars[groups['cockroachdb'][0]].ansible_default_ipv4.address }}"
+    port: 26257
+    timeout: 60
+  when: inventory_hostname != groups['cockroachdb'][0]
+  tags: cockroachdb
+
+- name: Start CockroachDB on other nodes
+  systemd:
+    name: cockroachdb
+    state: started
+  when: inventory_hostname != groups['cockroachdb'][0]
+  tags: cockroachdb
+
+- name: Wait for cluster to be ready
+  wait_for:
+    port: 26257
+    host: "{{ ansible_default_ipv4.address }}"
+    timeout: 60
+  tags: cockroachdb
+
+- name: Initialize cluster (first node only)
+  command: >
+    /usr/local/bin/cockroach init
+    --certs-dir=/etc/cockroach/certs
+    --host={{ hostvars[groups['cockroachdb'][0]].ansible_default_ipv4.address }}:26257
+  when: inventory_hostname == groups['cockroachdb'][0]
+  become: yes
+  become_user: cockroach
+  register: cluster_init
+  failed_when: cluster_init.rc != 0 and 'cluster has already been initialized' not in cluster_init.stderr
+  changed_when: cluster_init.rc == 0
+  tags: cockroachdb
+
+- name: Wait for cluster initialization
+  pause:
+    seconds: 10
+  when: inventory_hostname == groups['cockroachdb'][0] and cluster_init.changed
+  tags: cockroachdb
+
+- name: Create application database
+  command: >
+    /usr/local/bin/cockroach sql
+    --certs-dir=/etc/cockroach/certs
+    --host=localhost:26257
+    --execute="CREATE DATABASE IF NOT EXISTS {{ cockroachdb_app_database }};"
+  when: inventory_hostname == groups['cockroachdb'][0]
+  become: yes
+  become_user: cockroach
+  tags:
+    - cockroachdb
+    - database
+
+- name: Create application user
+  command: >
+    /usr/local/bin/cockroach sql
+    --certs-dir=/etc/cockroach/certs
+    --host=localhost:26257
+    --execute="CREATE USER IF NOT EXISTS {{ cockroachdb_app_user }} WITH PASSWORD '{{ vault_cockroachdb_app_password }}';"
+  when: inventory_hostname == groups['cockroachdb'][0]
+  become: yes
+  become_user: cockroach
+  no_log: yes
+  tags:
+    - cockroachdb
+    - database
+
+- name: Grant privileges to application user
+  command: >
+    /usr/local/bin/cockroach sql
+    --certs-dir=/etc/cockroach/certs
+    --host=localhost:26257
+    --execute="GRANT ALL ON DATABASE {{ cockroachdb_app_database }} TO {{ cockroachdb_app_user }};"
+  when: inventory_hostname == groups['cockroachdb'][0]
+  become: yes
+  become_user: cockroach
+  tags:
+    - cockroachdb
+    - database
+
+- name: Create readonly user
+  command: >
+    /usr/local/bin/cockroach sql
+    --certs-dir=/etc/cockroach/certs
+    --host=localhost:26257
+    --execute="CREATE USER IF NOT EXISTS {{ cockroachdb_readonly_user }} WITH PASSWORD '{{ vault_cockroachdb_readonly_password }}';"
+  when: inventory_hostname == groups['cockroachdb'][0]
+  become: yes
+  become_user: cockroach
+  no_log: yes
+  tags:
+    - cockroachdb
+    - database
+
+- name: Grant SELECT privileges to readonly user
+  command: >
+    /usr/local/bin/cockroach sql
+    --certs-dir=/etc/cockroach/certs
+    --host=localhost:26257
+    --execute="GRANT SELECT ON DATABASE {{ cockroachdb_app_database }} TO {{ cockroachdb_readonly_user }};"
+  when: inventory_hostname == groups['cockroachdb'][0]
+  become: yes
+  become_user: cockroach
+  tags:
+    - cockroachdb
+    - database
+
+- name: Create backup directory
+  file:
+    path: "{{ cockroachdb_backup_dir }}"
+    state: directory
+    owner: cockroach
+    group: cockroach
+    mode: '0755'
+  when: cockroachdb_enable_backups | default(true)
+  tags:
+    - cockroachdb
+    - backups
+
+- name: Create backup script
+  template:
+    src: backup-cockroach.sh.j2
+    dest: /opt/cockroachdb/backup-cockroach.sh
+    owner: cockroach
+    group: cockroach
+    mode: '0750'
+  when: cockroachdb_enable_backups | default(true) and inventory_hostname == groups['cockroachdb'][0]
+  tags:
+    - cockroachdb
+    - backups
+
+- name: Configure backup cron job
+  cron:
+    name: "CockroachDB backup"
+    minute: "0"
+    hour: "2"
+    job: "/opt/cockroachdb/backup-cockroach.sh >> /var/log/cockroach/backup.log 2>&1"
+    user: cockroach
+  when: cockroachdb_enable_backups | default(true) and inventory_hostname == groups['cockroachdb'][0]
+  tags:
+    - cockroachdb
+    - backups
+
+- name: Install cockroach systemd-exporter for Prometheus
+  get_url:
+    url: "https://github.com/cockroachdb/cockroach/releases/download/v{{ cockroachdb_version }}/cockroach-sql-v{{ cockroachdb_version }}.linux-amd64.tgz"
+    dest: /tmp/cockroach-exporter.tgz
+    mode: '0644'
+  when: cockroachdb_enable_monitoring | default(true)
+  tags:
+    - cockroachdb
+    - monitoring
+
+- name: Verify cluster health
+  command: >
+    /usr/local/bin/cockroach node status
+    --certs-dir=/etc/cockroach/certs
+    --host=localhost:26257
+  register: cluster_status
+  changed_when: false
+  become: yes
+  become_user: cockroach
+  tags: cockroachdb

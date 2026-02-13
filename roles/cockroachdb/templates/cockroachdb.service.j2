@@ -1,0 +1,51 @@
+[Unit]
+Description=CockroachDB - Distributed SQL Database
+Documentation=https://www.cockroachlabs.com/docs/
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=cockroach
+Group=cockroach
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+{% if inventory_hostname == groups['cockroachdb'][0] %}
+# First node - bootstrap the cluster
+ExecStart=/usr/local/bin/cockroach start \
+  --certs-dir=/etc/cockroach/certs \
+  --store=/var/lib/cockroach \
+  --listen-addr={{ ansible_default_ipv4.address }}:26257 \
+  --http-addr={{ ansible_default_ipv4.address }}:8080 \
+  --join={% for host in groups['cockroachdb'] %}{{ hostvars[host].ansible_default_ipv4.address }}:26257{% if not loop.last %},{% endif %}{% endfor %} \
+  --cache={{ cockroachdb_cache_size | default('25%') }} \
+  --max-sql-memory={{ cockroachdb_max_sql_memory | default('25%') }} \
+  --background
+{% else %}
+# Other nodes - join the cluster
+ExecStart=/usr/local/bin/cockroach start \
+  --certs-dir=/etc/cockroach/certs \
+  --store=/var/lib/cockroach \
+  --listen-addr={{ ansible_default_ipv4.address }}:26257 \
+  --http-addr={{ ansible_default_ipv4.address }}:8080 \
+  --join={% for host in groups['cockroachdb'] %}{{ hostvars[host].ansible_default_ipv4.address }}:26257{% if not loop.last %},{% endif %}{% endfor %} \
+  --cache={{ cockroachdb_cache_size | default('25%') }} \
+  --max-sql-memory={{ cockroachdb_max_sql_memory | default('25%') }} \
+  --background
+{% endif %}
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cockroach /var/log/cockroach
+
+# Resource limits
+LimitNOFILE=1048576
+LimitNPROC=32768
+LimitCORE=infinity
+
+[Install]
+WantedBy=multi-user.target

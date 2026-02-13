@@ -1,0 +1,11 @@
+---
+# Handlers for CockroachDB role
+
+- name: reload systemd
+  systemd:
+    daemon_reload: yes
+
+- name: restart cockroachdb
+  systemd:
+    name: cockroachdb
+    state: restarted
